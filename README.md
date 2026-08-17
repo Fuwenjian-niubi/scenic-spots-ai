@@ -1,15 +1,8 @@
-# 景点讲解 AI
+# 景点讲解 AI（直连式）
 
 > 面向游客的实时景点讲解系统：流式文本 + 语音播报，RAG 检索增强问答。中文原生、低延迟。
 
-本仓库提供**两套运行方式**，推荐方式一（零依赖直连）；方式二 AnythingLLM 需 Docker。
-
-| 方式 | 依赖 | 状态 | 适用场景 |
-|---|---|---|---|
-| ① 直连版（推荐） | 仅 Python 标准库 | ✅ 开箱即用 | 无 Docker/Ollama，直接跑 |
-| ② AnythingLLM 版 | Docker + AnythingLLM | ⚠️ 需 Docker | 需要完整 RAG 管理台 |
-
-> **背景**：本项目最初基于 AnythingLLM 搭建，但开发机因 IT 策略无法运行 Docker/WSL，故落地为**方式一（直连版）**——`web/server.py` 直接调用智谱 embedding-3 做向量化、DeepSeek 做流式问答、本地余弦检索，零 Docker / Ollama / AnythingLLM 依赖。方式二保留在 `deploy/`，供有 Docker 的环境使用。方案细节见 `docs/最优配置方案.md`。
+本项目采用**直连式架构**：`web/server.py` 直接调用智谱 embedding-3 做向量化、DeepSeek 做流式问答、本地余弦检索，零 Docker / Ollama / AnythingLLM 依赖，仅需 Python 标准库即可运行。方案细节见 `docs/最优配置方案.md`。
 
 ## 功能特性
 
@@ -21,7 +14,7 @@
 - 🎨 **界面**：三栏布局、深色模式、字号调节、收藏、搜索、快捷提问、演示模式兜底
 - ⚡ **缓存**：向量磁盘缓存（增量嵌入）+ LRU 语义响应缓存，重复问题免调用 LLM
 
-## 快速开始（直连版）
+## 快速开始
 
 ```bash
 # 1. 申请两个 Key：
@@ -42,15 +35,15 @@ python web/server.py        # 命令行启动
 
 ```
 ├── web/
-│   ├── server.py              # 直连版后端（纯标准库：嵌入/检索/流式/上传/加密/缓存）
+│   ├── server.py              # 直连后端（纯标准库：嵌入/检索/流式/上传/加密/缓存）
 │   └── index.html             # 前端（三栏布局/流式/语音/文档管理/设置抽屉）
 ├── scripts/
 │   ├── preprocess.py          # 景点文档清洗 + 结构化分块
 │   ├── run_e2e.py             # 直连端到端验证（零依赖）
-│   ├── demo_chat.py           # AnythingLLM 流式文本客户端（方式二）
-│   └── demo_voice.py          # AnythingLLM 流式语音客户端 Edge-TTS（方式二）
+│   ├── demo_chat.py           # AnythingLLM 流式文本客户端（可选）
+│   └── demo_voice.py          # AnythingLLM 流式语音客户端 Edge-TTS（可选）
 ├── sample-data/               # 内置 9 个景点知识文档（## 景点名 + 固定字段）
-├── deploy/docker-compose.yml  # AnythingLLM 一键部署（方式二，需 Docker）
+├── deploy/docker-compose.yml  # AnythingLLM 一键部署（可选）
 ├── docs/
 │   ├── 最优配置方案.md          # 完整方案（选型/分块/流式/缓存/预处理/参数表）
 │   └── 界面设计方案.md          # 界面设计（布局/令牌/交互/断点/验收清单）
@@ -70,7 +63,7 @@ python scripts/run_e2e.py "广州塔的门票多少钱？"
 python scripts/preprocess.py 原始文档目录 -o sample-data
 ```
 
-AnythingLLM 客户端（需先按方式二启动 AnythingLLM）：
+AnythingLLM 客户端（可选，需先启动 AnythingLLM）：
 
 ```bash
 pip install requests edge-tts
@@ -97,11 +90,11 @@ python scripts/demo_voice.py "给我讲讲广州塔"        # 流式语音(生�
 
 | 变量 | 说明 | 必填 |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | DeepSeek 聊天模型 Key | 直连版 ✅ |
-| `ZHIPU_API_KEY` | 智谱 embedding-3 Key | 直连版 ✅ |
-| `ALLM_BASE` | AnythingLLM 地址（方式二） | 默认 `http://localhost:3001` |
-| `ALLM_KEY` | AnythingLLM API Key（方式二） | — |
-| `ALLM_SLUG` | AnythingLLM 工作区 slug（方式二） | 默认 `scenic-spots` |
+| `DEEPSEEK_API_KEY` | DeepSeek 聊天模型 Key | 直连 ✅ |
+| `ZHIPU_API_KEY` | 智谱 embedding-3 Key | 直连 ✅ |
+| `ALLM_BASE` | AnythingLLM 地址（可选） | 默认 `http://localhost:3001` |
+| `ALLM_KEY` | AnythingLLM API Key（可选） | — |
+| `ALLM_SLUG` | AnythingLLM 工作区 slug（可选） | 默认 `scenic-spots` |
 | `TTS_VOICE` | Edge-TTS 音色 | 默认 `zh-CN-YunxiNeural` |
 
 ## 测试与质检
@@ -111,7 +104,9 @@ python -m unittest tests.test_preprocess tests.test_run_e2e   # 17 项单元测�
 python -m ruff check .                                        # 代码质量
 ```
 
-## AnythingLLM 部署（方式二，可选）
+## AnythingLLM 部署（可选）
+
+如需完整的 RAG 管理台，可改用 AnythingLLM 部署：
 
 ```bash
 cd deploy
@@ -119,7 +114,7 @@ docker compose --env-file ../.env up -d
 # 访问 http://localhost:3001（密码见 docker-compose 的 AUTH_TOKEN）
 ```
 
-> 需本机已装 Docker Desktop。若环境不支持 Docker（如本开发机），请使用方式一（直连版）。
+> 需本机已装 Docker Desktop。
 
 ## 知识库文档格式
 
