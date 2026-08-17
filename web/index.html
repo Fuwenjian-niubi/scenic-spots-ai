@@ -1,0 +1,1153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>景点讲解 AI</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f1f3f5;
+    --border: #e5e7eb; --text: #1f2937; --muted: #6b7280; --hint: #9aa1ab;
+    --accent: #2563eb; --accent-soft: #eff6ff; --teal: #0f766e; --teal-soft: #e1f5ee;
+    --danger: #dc2626; --danger-soft: #fef2f2; --danger-border: #fecaca;
+    --warning: #b45309; --warning-soft: #fef3e2;
+    --radius: 12px; --fs-body: 14px;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.05);
+    --shadow-lg: 0 20px 60px rgba(0,0,0,.18);
+  }
+  [data-theme="dark"] {
+    --bg: #0f1115; --panel: #1a1d23; --panel-2: #23262c;
+    --border: #2c3038; --text: #e6e8eb; --muted: #9aa1ab; --hint: #6b7280;
+    --accent: #3b82f6; --accent-soft: #1e2a44; --teal: #2dd4bf; --teal-soft: #123c35;
+    --danger: #f87171; --danger-soft: #3a2023; --danger-border: #6b2b2b;
+    --warning: #fbbf24; --warning-soft: #3a2e12;
+  }
+  [data-fs="small"] { --fs-body: 13px; }
+  [data-fs="large"] { --fs-body: 16px; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    transition: background .2s, color .2s;
+  }
+  button { font-family: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- 顶部导航 ---------- */
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex: none;
+  }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px; flex: none;
+    background: linear-gradient(135deg, var(--accent), var(--teal));
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 600; font-size: 15px;
+  }
+  .brand .title { font-size: 16px; font-weight: 600; line-height: 1.2; }
+  .brand .subtitle { font-size: 12px; color: var(--muted); }
+  .cur-spot { font-size: 12px; color: var(--muted); }
+  .cur-spot b { color: var(--accent); font-weight: 500; }
+  .spacer { flex: 1; }
+  .icon-btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
+    border-radius: 999px; border: 1px solid var(--border); background: var(--panel);
+    cursor: pointer; font-size: 13px; color: var(--text); transition: all .15s;
+  }
+  .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .voice-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--hint); flex: none; }
+  .voice-btn.on .dot { background: var(--accent); }
+
+  /* ---------- 布局 ---------- */
+  .layout { display: flex; flex: 1; overflow: hidden; }
+  aside {
+    width: 240px; background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; flex: none; transition: transform .25s;
+  }
+  .aside-head { padding: 14px 14px 10px; }
+  .aside-head h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+  .search {
+    width: 100%; padding: 8px 12px; border-radius: 9px; border: 1px solid var(--border);
+    background: var(--panel-2); font-size: 13px; color: var(--text); outline: none;
+  }
+  .search:focus { border-color: var(--accent); background: var(--panel); }
+  .spot-list { flex: 1; overflow-y: auto; padding: 4px 10px 10px; }
+  .spot {
+    display: flex; align-items: center; gap: 10px; padding: 10px 10px;
+    border-radius: 10px; cursor: pointer; margin-bottom: 4px; transition: background .15s;
+    position: relative;
+  }
+  .spot:hover { background: var(--bg); }
+  .spot.active { background: var(--accent-soft); }
+  .badge {
+    width: 30px; height: 30px; border-radius: 8px; flex: none; background: var(--bg);
+    color: var(--teal); display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 600;
+  }
+  .spot.active .badge { background: var(--accent); color: #fff; }
+  .spot-main { flex: 1; min-width: 0; }
+  .spot-name { font-size: 14px; }
+  .spot-intro { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .star {
+    border: none; background: none; cursor: pointer; font-size: 15px; color: var(--hint);
+    padding: 2px 4px; line-height: 1;
+  }
+  .star.on { color: #f59e0b; }
+  .aside-foot { padding: 10px 14px; font-size: 11px; color: var(--hint); border-top: 1px solid var(--border); }
+  .empty { text-align: center; color: var(--muted); font-size: 13px; padding: 20px 0; }
+  .empty .big { font-size: 30px; margin-bottom: 8px; }
+
+  main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .detail-card {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 14px 20px; display: none;
+  }
+  .detail-card.show { display: block; }
+  .detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .detail-name { font-size: 15px; font-weight: 600; }
+  .detail-intro { font-size: var(--fs-body); color: var(--muted); line-height: 1.6; }
+  .chips { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .chip {
+    padding: 6px 13px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--panel); cursor: pointer; font-size: 12px; color: var(--accent);
+    transition: all .15s; white-space: nowrap;
+  }
+  .chip:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+  .chat { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+  .welcome {
+    margin: auto; text-align: center; color: var(--muted); max-width: 360px;
+  }
+  .welcome .big { font-size: 40px; margin-bottom: 12px; }
+  .welcome h3 { font-size: 16px; color: var(--text); margin-bottom: 6px; font-weight: 600; }
+  .welcome p { font-size: 13px; line-height: 1.7; }
+  .msg { display: flex; gap: 10px; max-width: 78%; }
+  .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  .avatar {
+    width: 30px; height: 30px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600; color: #fff;
+  }
+  .msg.assistant .avatar { background: var(--teal); }
+  .msg.user .avatar { background: var(--accent); }
+  .bubble-wrap { display: flex; flex-direction: column; gap: 6px; }
+  .msg.user .bubble-wrap { align-items: flex-end; }
+  .bubble {
+    padding: 11px 14px; border-radius: 12px; font-size: var(--fs-body);
+    line-height: 1.7; white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.assistant .bubble { background: var(--panel); border: 1px solid var(--border); }
+  .msg.user .bubble { background: var(--accent); color: #fff; }
+  .cursor { display: inline-block; width: 8px; height: 15px; background: var(--accent); vertical-align: -2px; animation: blink .8s infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .msg-actions { display: flex; gap: 6px; }
+  .mini-btn {
+    border: none; background: none; cursor: pointer; color: var(--muted);
+    font-size: 12px; padding: 2px 6px; border-radius: 6px;
+  }
+  .mini-btn:hover { background: var(--panel-2); color: var(--accent); }
+  .mini-btn.danger-mini:hover { background: var(--danger-soft); color: var(--danger); }
+  .sources { font-size: 12px; color: var(--muted); }
+  .error-line { font-size: 13px; color: var(--danger); display: flex; align-items: center; gap: 8px; }
+  .retry-btn {
+    padding: 4px 12px; border-radius: 999px; border: 1px solid var(--danger-border);
+    background: var(--panel); color: var(--danger); cursor: pointer; font-size: 12px;
+  }
+  .retry-btn:hover { background: var(--danger-soft); }
+
+  .composer {
+    display: flex; gap: 10px; padding: 14px 20px; align-items: flex-end;
+    background: var(--panel); border-top: 1px solid var(--border); flex: none;
+  }
+  .composer textarea {
+    flex: 1; padding: 12px 16px; border-radius: 14px; border: 1px solid var(--border);
+    font-size: 14px; font-family: inherit; outline: none; resize: none; max-height: 120px;
+    background: var(--panel); color: var(--text); line-height: 1.5;
+  }
+  .composer textarea:focus { border-color: var(--accent); }
+  .send {
+    padding: 12px 22px; border-radius: 999px; border: none; background: var(--accent);
+    color: #fff; font-size: 14px; cursor: pointer; flex: none; transition: opacity .15s;
+  }
+  .send:hover { opacity: .9; }
+  .send:disabled { opacity: .5; cursor: not-allowed; }
+  .send.stop { background: var(--danger); }
+
+  /* ---------- 服务横幅 ---------- */
+  .banner {
+    display: none; align-items: center; gap: 8px; padding: 8px 20px;
+    background: var(--warning-soft); color: var(--warning); font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .banner.show { display: flex; }
+
+  /* ---------- 设置抽屉 ---------- */
+  .drawer-mask {
+    position: fixed; inset: 0; background: rgba(17,24,39,.42); z-index: 50;
+    display: none; opacity: 0; transition: opacity .2s;
+  }
+  .drawer-mask.show { display: block; opacity: 1; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 480px; max-width: 100vw;
+    background: var(--panel); z-index: 60; transform: translateX(100%);
+    transition: transform .25s; display: flex; flex-direction: column; box-shadow: var(--shadow-lg);
+  }
+  .drawer.show { transform: translateX(0); }
+  .drawer-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; border-bottom: 1px solid var(--border); flex: none;
+  }
+  .drawer-head h3 { font-size: 16px; font-weight: 600; }
+  .close-btn { border: none; background: none; cursor: pointer; font-size: 24px; color: var(--muted); line-height: 1; padding: 2px 6px; }
+  .drawer-body { display: flex; flex: 1; overflow: hidden; }
+  .cat-nav { width: 120px; border-right: 1px solid var(--border); padding: 10px 8px; flex: none; overflow-y: auto; }
+  .cat-item {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 9px;
+    cursor: pointer; font-size: 13px; color: var(--muted); margin-bottom: 2px;
+  }
+  .cat-item:hover { background: var(--bg); }
+  .cat-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+  .cat-content { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .pane { display: none; }
+  .pane.active { display: block; }
+  .pane h4 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .pane-desc { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+  .field { margin-bottom: 18px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+  .field .row { display: flex; gap: 8px; }
+  .field input[type=password], .field input[type=text] {
+    flex: 1; padding: 10px 14px; border-radius: 10px; min-width: 0;
+    border: 1px solid var(--border); font-size: 14px; outline: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--panel); color: var(--text);
+  }
+  .field input:focus { border-color: var(--accent); }
+  .btn {
+    padding: 10px 16px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--panel); cursor: pointer; font-size: 13px; color: var(--text);
+    white-space: nowrap; transition: opacity .15s;
+  }
+  .btn:hover { opacity: .88; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.danger { color: var(--danger); border-color: var(--danger-border); }
+  .btn.danger:hover { background: var(--danger-soft); }
+  .status-line { font-size: 12px; color: var(--muted); margin-top: 6px; word-break: break-all; }
+  .status-line .ok { color: var(--teal); font-weight: 500; }
+  .mask-pill { font-family: ui-monospace, Menlo, monospace; background: var(--panel-2); padding: 2px 8px; border-radius: 6px; }
+
+  /* 开关与滑杆 */
+  .switch-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; }
+  .switch-row .info { font-size: 13px; }
+  .switch-row .info small { display: block; color: var(--muted); font-size: 12px; }
+  .switch { position: relative; width: 44px; height: 24px; flex: none; }
+  .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+  .switch .track { width: 44px; height: 24px; border-radius: 999px; background: var(--hint); transition: background .2s; }
+  .switch .thumb { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: left .2s; }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track + .thumb { left: 23px; }
+  .slider-row { padding: 10px 0; }
+  .slider-row label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px; }
+  .slider-row output { color: var(--accent); font-weight: 500; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .radio-group { display: flex; gap: 8px; flex-wrap: wrap; }
+  .radio-group label {
+    display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
+    border: 1px solid var(--border); border-radius: 9px; cursor: pointer; font-size: 13px;
+  }
+  .radio-group input:checked + span { color: var(--accent); font-weight: 500; }
+  .radio-group label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+  select {
+    padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border);
+    font-size: 13px; background: var(--panel); color: var(--text); outline: none; min-width: 160px;
+  }
+  .danger-zone { border: 1px solid var(--danger-border); border-radius: 10px; padding: 14px; background: var(--danger-soft); }
+  .danger-zone h5 { font-size: 13px; color: var(--danger); margin-bottom: 8px; }
+  .danger-zone .row { display: flex; gap: 8px; margin-top: 6px; }
+  .about-line { font-size: 13px; line-height: 1.8; color: var(--muted); }
+
+  /* 文档 */
+  .dropzone {
+    border: 2px dashed var(--border); border-radius: 12px; padding: 24px;
+    text-align: center; cursor: pointer; transition: all .15s; color: var(--muted);
+  }
+  .dropzone:hover, .dropzone.drag { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+  .dropzone .big { font-size: 28px; }
+  .dropzone .hint { font-size: 12px; margin-top: 6px; }
+  .file-list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .file-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+  .file-icon { width: 36px; height: 36px; border-radius: 8px; flex: none; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: #fff; text-transform: uppercase; }
+  .file-meta { flex: 1; min-width: 0; }
+  .file-name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .file-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .spot-tag {
+    display: inline-block; padding: 1px 7px; margin-right: 4px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-size: 11px;
+  }
+  .src-badge {
+    display: inline-block; padding: 1px 6px; margin-right: 4px; border-radius: 6px;
+    font-size: 11px; background: var(--panel-2); color: var(--muted);
+  }
+  .src-badge.sample { background: var(--teal-soft); color: var(--teal); }
+  .file-del { border: none; background: none; cursor: pointer; color: var(--danger); font-size: 13px; padding: 6px 8px; border-radius: 8px; flex: none; }
+  .file-del:hover { background: var(--danger-soft); }
+
+  /* 景点文件夹 */
+  .spot-folder-list { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; }
+  .folder { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .folder-head {
+    display: flex; align-items: center; gap: 10px; padding: 11px 12px;
+    cursor: pointer; background: var(--panel); transition: background .15s;
+  }
+  .folder-head:hover { background: var(--panel-2); }
+  .folder-icon { font-size: 16px; }
+  .folder-name { flex: 1; font-size: 14px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .folder-count { font-size: 12px; color: var(--muted); flex: none; }
+  .folder-arrow { font-size: 12px; color: var(--muted); flex: none; }
+  .folder-body { display: none; padding: 10px 12px; border-top: 1px solid var(--border); background: var(--panel); }
+  .folder-body.open { display: block; }
+  .folder-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+  .folder-actions .btn { padding: 7px 14px; font-size: 12px; }
+
+  .toast {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+    background: #1f2937; color: #fff; padding: 10px 18px; border-radius: 10px;
+    font-size: 13px; z-index: 100; opacity: 0; pointer-events: none; transition: opacity .2s;
+    max-width: 82vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .toast.show { opacity: 1; }
+  .toast.error { background: var(--danger); }
+  .toast.success { background: var(--teal); }
+
+  /* ---------- 响应式 ---------- */
+  .menu-btn { display: none; }
+  @media (max-width: 900px) {
+    .menu-btn { display: inline-flex; }
+    aside {
+      position: fixed; top: 0; left: 0; bottom: 0; z-index: 55; width: 260px;
+      transform: translateX(-100%); box-shadow: var(--shadow-lg);
+    }
+    aside.open { transform: translateX(0); }
+    .msg { max-width: 90%; }
+  }
+  @media (max-width: 640px) {
+    .brand .subtitle, .cur-spot { display: none; }
+    header { padding: 10px 12px; gap: 8px; }
+    .chat { padding: 12px; }
+    .composer { padding: 10px 12px; }
+    .msg { max-width: 96%; }
+    .detail-card { padding: 12px 12px; }
+    .cat-nav { width: 96px; }
+    .cat-content { padding: 14px 14px; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <button class="icon-btn menu-btn" id="menuBtn" aria-label="打开景点列表">☰</button>
+    <div class="logo">景</div>
+    <div class="brand">
+      <div class="title">景点讲解 AI</div>
+      <div class="subtitle">DeepSeek 驱动 · 流式讲解 · 语音播报</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="cur-spot" id="curSpot"></div>
+    <button class="voice-btn icon-btn" id="voiceBtn" role="switch" aria-checked="false" onclick="toggleVoice()">
+      <span class="dot"></span> 语音播报
+    </button>
+    <button class="icon-btn" onclick="openSettings()" aria-label="打开设置">⚙ 设置</button>
+  </header>
+
+  <div class="banner" id="banner">⚠️ 服务未连接，当前为演示模式（数据为本地示例）</div>
+
+  <div class="layout">
+    <aside id="sidebar">
+      <div class="aside-head">
+        <h2>景点列表</h2>
+        <input class="search" id="search" placeholder="搜索景点…" aria-label="搜索景点">
+      </div>
+      <div class="spot-list" id="spotList"></div>
+      <div class="aside-foot" id="spotCount"></div>
+    </aside>
+
+    <main>
+      <div class="detail-card" id="detailCard">
+        <div class="detail-head">
+          <span class="detail-name" id="detailName"></span>
+          <div class="spacer"></div>
+          <button class="mini-btn" onclick="addDocToSpot()">＋ 加文档</button>
+          <button class="mini-btn danger-mini" onclick="deleteSpot()">删除景点</button>
+        </div>
+        <div class="detail-intro" id="detailIntro"></div>
+        <div class="chips" id="detailChips"></div>
+      </div>
+      <div class="chat" id="chat" aria-live="polite">
+        <div class="welcome" id="welcome">
+          <div class="big">🏛️</div>
+          <h3>你好，我是景点讲解助手</h3>
+          <p>点击左侧景点开始讲解，或直接输入问题。我会用文字 + 语音为你实时讲解。</p>
+        </div>
+      </div>
+      <div class="composer">
+        <textarea id="input" rows="1" placeholder="例如：陈家祠有什么历史故事？" aria-label="输入问题"></textarea>
+        <button class="send" id="sendBtn" onclick="send()">发送</button>
+      </div>
+    </main>
+  </div>
+
+  <!-- 设置抽屉 -->
+  <div class="drawer-mask" id="drawerMask" onclick="closeSettings()"></div>
+  <div class="drawer" id="drawer" role="dialog" aria-label="设置">
+    <div class="drawer-head">
+      <h3>设置</h3>
+      <button class="close-btn" onclick="closeSettings()" aria-label="关闭">×</button>
+    </div>
+    <div class="drawer-body">
+      <nav class="cat-nav" id="catNav">
+        <div class="cat-item active" data-cat="account" onclick="switchCat('account')">👤 账号</div>
+        <div class="cat-item" data-cat="notify" onclick="switchCat('notify')">🔔 通知</div>
+        <div class="cat-item" data-cat="appearance" onclick="switchCat('appearance')">🎨 外观</div>
+        <div class="cat-item" data-cat="privacy" onclick="switchCat('privacy')">🔒 隐私</div>
+        <div class="cat-item" data-cat="general" onclick="switchCat('general')">⚙ 通用</div>
+      </nav>
+      <div class="cat-content">
+        <div class="pane active" id="pane-account">
+          <h4>账号 · API Key</h4>
+          <p class="pane-desc">配置模型服务密钥，用于讲解与检索</p>
+          <div class="field">
+            <label for="deepseekKey">DeepSeek API Key</label>
+            <div class="row">
+              <input type="password" id="deepseekKey" placeholder="sk-..." autocomplete="off" spellcheck="false">
+              <button class="btn primary" onclick="saveKey('deepseek')">保存</button>
+              <button class="btn danger" onclick="clearKey('deepseek')">清除</button>
+            </div>
+            <div class="status-line" id="deepseekStatus"></div>
+          </div>
+          <div class="field">
+            <label for="zhipuKey">智谱 Embedding API Key</label>
+            <div class="row">
+              <input type="password" id="zhipuKey" placeholder="输入智谱 API Key" autocomplete="off" spellcheck="false">
+              <button class="btn primary" onclick="saveKey('zhipu')">保存</button>
+              <button class="btn danger" onclick="clearKey('zhipu')">清除</button>
+            </div>
+            <div class="status-line" id="zhipuStatus"></div>
+          </div>
+        </div>
+
+        <div class="pane" id="pane-notify">
+          <h4>通知 · 语音</h4>
+          <p class="pane-desc">控制讲解语音播报行为</p>
+          <div class="switch-row">
+            <div class="info">语音播报<small>讲解内容自动朗读</small></div>
+            <label class="switch"><input type="checkbox" id="notifyVoice" onchange="applyVoiceSetting()"><span class="track"></span><span class="thumb"></span></label>
+          </div>
+          <div class="slider-row">
+            <label>语速 <output id="rateOut">1.0×</output></label>
+            <input type="range" id="rateRange" min="0.5" max="3.0" step="0.1" value="1.0" oninput="applyVoiceSetting()">
+          </div>
+          <div class="slider-row">
+            <label>音量 <output id="volOut">100%</output></label>
+            <input type="range" id="volRange" min="0" max="1" step="0.1" value="1" oninput="applyVoiceSetting()">
+          </div>
+          <div class="field">
+            <label for="voiceSelect">音色</label>
+            <div class="row">
+              <select id="voiceSelect" onchange="applyVoiceSetting()"></select>
+              <button class="btn" onclick="previewVoice()">试听</button>
+            </div>
+            <div class="status-line">音色来自系统语音库；点「试听」可直接听效果</div>
+          </div>
+        </div>
+
+        <div class="pane" id="pane-appearance">
+          <h4>外观</h4>
+          <p class="pane-desc">调整主题与正文字号</p>
+          <div class="field">
+            <label>主题</label>
+            <div class="radio-group" id="themeGroup">
+              <label><input type="radio" name="theme" value="light" onchange="applyAppearanceChange()"><span>浅色</span></label>
+              <label><input type="radio" name="theme" value="dark" onchange="applyAppearanceChange()"><span>深色</span></label>
+              <label><input type="radio" name="theme" value="system" onchange="applyAppearanceChange()"><span>跟随系统</span></label>
+            </div>
+          </div>
+          <div class="field">
+            <label>正文字号</label>
+            <div class="radio-group" id="fsGroup">
+              <label><input type="radio" name="fs" value="small" onchange="applyAppearanceChange()"><span>小</span></label>
+              <label><input type="radio" name="fs" value="medium" onchange="applyAppearanceChange()"><span>中</span></label>
+              <label><input type="radio" name="fs" value="large" onchange="applyAppearanceChange()"><span>大</span></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="pane" id="pane-privacy">
+          <h4>隐私</h4>
+          <p class="pane-desc">本地数据管理（均存于当前浏览器）</p>
+          <div class="danger-zone">
+            <h5>危险操作</h5>
+            <div class="row">
+              <button class="btn danger" onclick="clearChat()">清空对话记录</button>
+              <button class="btn danger" onclick="clearLocalCache()">清除本地缓存</button>
+            </div>
+            <p class="status-line" style="margin-top:10px">对话记录仅存于内存，刷新即清空；本地缓存含收藏、主题、字号等偏好设置。</p>
+          </div>
+        </div>
+
+        <div class="pane" id="pane-general">
+          <h4>通用 · 知识库管理</h4>
+          <p class="pane-desc">景点即文件夹：新建景点，往里放入该景点的文档</p>
+          <div class="field">
+            <label for="newSpotName">新建景点</label>
+            <div class="row">
+              <input type="text" id="newSpotName" placeholder="输入景点名，如「广州塔」">
+              <button class="btn primary" onclick="createSpot()">＋ 新建</button>
+            </div>
+          </div>
+          <div class="spot-folder-list" id="spotFolderList"></div>
+          <input type="file" id="fileInput" multiple accept=".doc,.docx,.pdf,.md,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff" style="display:none">
+
+          <div class="field" style="margin-top:18px">
+            <label>默认景点</label>
+            <select id="defaultSpot" onchange="saveDefaultSpot()">
+              <option value="">无</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>关于</label>
+            <div class="about-line">景点讲解 AI v2.0<br>聊天：DeepSeek · 嵌入：智谱 embedding-3<br>流式讲解 · 语音播报 · 本地检索</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+  // ================= 状态 =================
+  const $ = (id) => document.getElementById(id);
+  const chat = $("chat"), input = $("input"), sendBtn = $("sendBtn");
+  let spots = [];                 // [{name, intro}]
+  let spotFiles = [];             // 文档列表（含 spots 归属）
+  let currentSpot = null;
+  let sessionId = "web-" + Date.now();
+  let voiceOn = false;
+  let streaming = false;
+  let uploadTargetSpot = "";      // 当前上传目标景点
+  let expandedSpot = null;        // 展开的景点文件夹
+  let favorites = JSON.parse(localStorage.getItem("scenic.favs") || "[]");
+  let settings = JSON.parse(localStorage.getItem("scenic.settings") || "{}");
+  const QUICK_PROMPTS = ["怎么去", "门票多少", "开放时间", "推荐看点"];
+
+  // ================= 演示数据（后端不可达时兜底） =================
+  const DEMO_SPOTS = [
+    { name: "广州塔", intro: "位于广州市海珠区，塔高600米，是中国第一高塔、世界第三高塔，广州的城市地标。" },
+    { name: "陈家祠", intro: "广东现存规模最大、保存最完整的清代宗祠建筑群，建于1894年，岭南建筑明珠。" },
+    { name: "越秀公园", intro: "广州最大的综合性公园，园内五羊石像是羊城别称的由来与城徽象征。" },
+  ];
+  const DEMO_TEXT = {
+    "广州塔": "广州塔又称“小蛮腰”，塔高600米，是中国第一高塔。它2009年建成，整体采用双曲面扭转造型，寓意“活力之都、开放之窗”。登塔可到450米观景平台俯瞰全城，还能体验488米的极速云霄和塔顶摩天轮。坐地铁3号线或APM线到广州塔站即可，开放时间9:30到22:30，成人票150元起。",
+    "陈家祠": "陈家祠正式名“陈氏书院”，建于1894年，是广东保存最完整的清代宗祠建筑群。它集岭南建筑艺术之大成，木雕、石雕、砖雕、陶塑、灰塑和铜铁铸合称“三雕三塑一铸”，被誉为岭南建筑明珠。乘地铁1号线到陈家祠站D口出即到，开放时间9:00到17:30，周一闭馆，门票10元。",
+    "越秀公园": "越秀公园是广州最大的综合性公园，因园内有越秀山而得名，1952年建成。园内的五羊石像是广州“羊城”别称的由来和城徽象征，还有镇海楼、明代城墙、中山纪念碑等古迹。乘地铁2号线到越秀公园站即可，开放时间6:00到22:00，公园免费，镇海楼另收10元。",
+  };
+
+  // ================= 初始化 =================
+  function init() {
+    applyAppearance();
+    loadVoices();
+    initNotifyUI();
+    loadSpots();
+  }
+
+  // ================= 语音 =================
+  let voices = [];
+  function loadVoices() {
+    voices = speechSynthesis.getVoices().filter(v => /zh|cmn/i.test(v.lang));
+    renderVoiceSelect();
+  }
+  function renderVoiceSelect() {
+    const sel = $("voiceSelect");
+    if (!sel) return;
+    const cur = settings.voice || "";
+    if (!voices.length) {
+      sel.innerHTML = '<option value="">默认音色（音色加载中…）</option>';
+      return;
+    }
+    sel.innerHTML = '<option value="">默认（跟随系统）</option>' + voices.map(v =>
+      `<option value="${esc(v.name)}" ${v.name === cur ? "selected" : ""}>${esc(v.name)}</option>`
+    ).join("");
+  }
+  function getSelectedVoice() {
+    if (!settings.voice) return null;
+    return voices.find(v => v.name === settings.voice) || null;
+  }
+  function previewVoice() {
+    if (!("speechSynthesis" in window)) { toast("当前浏览器不支持语音", "error"); return; }
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance("你好，这是语音试听，欢迎使用景点讲解助手。");
+    const v = getSelectedVoice();
+    if (v) u.voice = v;
+    u.lang = "zh-CN";
+    u.rate = parseFloat(settings.rate || "1.0");
+    u.volume = 1;
+    speechSynthesis.speak(u);
+  }
+  speechSynthesis.onvoiceschanged = loadVoices;
+  function speak(text) {
+    if (!("speechSynthesis" in window)) return;
+    speechSynthesis.cancel();  // 打断上一段播报，播报最新完整回答
+    const u = new SpeechSynthesisUtterance(text);
+    const v = getSelectedVoice();
+    if (v) u.voice = v;
+    u.lang = "zh-CN";
+    u.rate = parseFloat(settings.rate || "1.0");
+    u.volume = parseFloat(settings.volume ?? "1");
+    speechSynthesis.speak(u);
+  }
+  function toggleVoice() {
+    voiceOn = !voiceOn;
+    $("voiceBtn").classList.toggle("on", voiceOn);
+    $("voiceBtn").setAttribute("aria-checked", voiceOn);
+    $("notifyVoice").checked = voiceOn;
+    if (!voiceOn) { speechSynthesis.cancel(); }
+    toast(voiceOn ? "已开启语音播报" : "已关闭语音播报", voiceOn ? "success" : "");
+  }
+
+  // ================= 景点列表 =================
+  async function loadSpots() {
+    try {
+      const r = await fetch("/api/spots");
+      const d = await r.json();
+      if (d.spots && d.spots.length) spots = d.spots;
+      else throw new Error("empty");
+      $("banner").classList.remove("show");
+    } catch (e) {
+      spots = DEMO_SPOTS;
+      $("banner").classList.add("show");
+    }
+    fillDefaultSpotSelect();
+    renderSpots();
+    renderSpotFolders();
+    if (settings.defaultSpot && spots.find(s => s.name === settings.defaultSpot)) {
+      selectSpot(settings.defaultSpot, { silent: true });
+    }
+  }
+  function renderSpots() {
+    const q = ($("search").value || "").trim();
+    let list = spots.filter(s => s.name.includes(q));
+    if (!q) {
+      list = [...list].sort((a, b) =>
+        (favorites.includes(b.name) ? 1 : 0) - (favorites.includes(a.name) ? 1 : 0));
+    }
+    const el = $("spotList");
+    $("spotCount").textContent = "共 " + spots.length + " 个景点";
+    if (!spots.length) {
+      el.innerHTML = '<div class="empty"><div class="big">🏛️</div>暂无景点，请先到「设置 → 通用」上传文档</div>';
+      return;
+    }
+    if (!list.length) {
+      el.innerHTML = `<div class="empty"><div class="big">🔍</div>未找到「${esc(q)}」相关景点</div>`;
+      return;
+    }
+    el.innerHTML = list.map(s => {
+      const fav = favorites.includes(s.name);
+      return `<div class="spot ${s.name === currentSpot ? 'active' : ''}" onclick="selectSpot('${esc(s.name)}')" role="button" tabindex="0">
+        <div class="badge">${esc(s.name[0])}</div>
+        <div class="spot-main">
+          <div class="spot-name">${esc(s.name)}</div>
+          <div class="spot-intro">${esc(s.intro || "")}</div>
+        </div>
+        <button class="star ${fav ? 'on' : ''}" onclick="event.stopPropagation();toggleFav('${esc(s.name)}')" aria-label="收藏 ${esc(s.name)}">★</button>
+      </div>`;
+    }).join("");
+  }
+  function toggleFav(name) {
+    favorites = favorites.includes(name)
+      ? favorites.filter(n => n !== name)
+      : [...favorites, name];
+    localStorage.setItem("scenic.favs", JSON.stringify(favorites));
+    renderSpots();
+  }
+  function selectSpot(name, opts = {}) {
+    currentSpot = name;
+    const s = spots.find(x => x.name === name);
+    $("curSpot").innerHTML = s ? `正在讲解：<b>${esc(name)}</b>` : "";
+    $("detailCard").classList.add("show");
+    $("detailName").textContent = name;
+    $("detailIntro").textContent = (s && s.intro) || "";
+    $("detailChips").innerHTML = QUICK_PROMPTS.map(p =>
+      `<button class="chip" onclick="quickAsk('${p}')">${p}</button>`).join("");
+    document.querySelectorAll(".spot").forEach(el =>
+      el.classList.toggle("active", el.querySelector(".spot-name").textContent === name));
+    if (opts.silent) return;
+    send(`请介绍一下${name}`);
+    if (window.innerWidth <= 900) $("sidebar").classList.remove("open");
+  }
+  function quickAsk(p) {
+    if (!currentSpot) { toast("请先选择景点", "error"); return; }
+    send(`${currentSpot} ${p}`);
+  }
+
+  // ================= 消息渲染 =================
+  function addMsg(role, text) {
+    $("welcome")?.remove();
+    const wrap = document.createElement("div");
+    wrap.className = "msg " + role;
+    wrap.innerHTML = role === "user"
+      ? `<div class="avatar">我</div><div class="bubble-wrap"><div class="bubble"></div></div>`
+      : `<div class="avatar">AI</div><div class="bubble-wrap"><div class="bubble"></div></div>`;
+    wrap.querySelector(".bubble").textContent = text;
+    chat.appendChild(wrap);
+    scrollBottom();
+    return wrap.querySelector(".bubble-wrap");
+  }
+  function addActions(wrap, full) {
+    const actions = document.createElement("div");
+    actions.className = "msg-actions";
+    actions.innerHTML = `<button class="mini-btn" onclick="speak(this.dataset.t)">🔊 重播</button>
+      <button class="mini-btn" onclick="copyText(this.dataset.t)">📋 复制</button>`;
+    actions.querySelectorAll("button").forEach(b => b.dataset.t = full);
+    wrap.appendChild(actions);
+  }
+  async function copyText(t) {
+    try { await navigator.clipboard.writeText(t); toast("已复制", "success"); }
+    catch (e) { toast("复制失败", "error"); }
+  }
+  function scrollBottom() { chat.scrollTop = chat.scrollHeight; }
+
+  // ================= 发送与流式接收 =================
+  function send(msg) {
+    if (streaming) { stopStream(); return; }
+    const message = (msg || input.value).trim();
+    if (!message) return;
+    input.value = ""; autoResize();
+    speechSynthesis.cancel();  // 新一轮对话：停止上一段播报
+    addMsg("user", message);
+    const wrap = addMsg("assistant", "");
+    const bubble = wrap.querySelector(".bubble");
+    bubble.innerHTML = '<span class="cursor"></span>';
+    setStreaming(true);
+    let full = "";
+
+    doChat(message, wrap, bubble, (text) => { full += text; })
+      .then((sources) => {
+        bubble.querySelector(".cursor")?.remove();
+        finishSources(bubble, sources);
+        addActions(wrap, full);
+        if (voiceOn && full.trim()) speak(full);
+      })
+      .catch((e) => {
+        bubble.innerHTML = "";
+        const err = document.createElement("div");
+        err.className = "error-line";
+        err.innerHTML = `<span>讲解失败：${esc(e.message || "网络错误")}</span>
+          <button class="retry-btn" onclick="retry('${esc(message)}', this)">重试</button>`;
+        bubble.appendChild(err);
+      })
+      .finally(() => setStreaming(false));
+  }
+  function retry(message, btn) {
+    const wrap = btn.closest(".bubble-wrap");
+    btn.closest(".error-line").remove();
+    const bubble = wrap.querySelector(".bubble");
+    bubble.innerHTML = '<span class="cursor"></span>';
+    setStreaming(true);
+    let full = "";
+    doChat(message, wrap, bubble, (t) => { full += t; })
+      .then((sources) => { bubble.querySelector(".cursor")?.remove(); finishSources(bubble, sources); addActions(wrap, full); if (voiceOn && full.trim()) speak(full); })
+      .catch((e) => { bubble.innerHTML = ""; bubble.textContent = "重试失败：" + (e.message || "网络错误"); })
+      .finally(() => setStreaming(false));
+  }
+  let abortCtrl = null;
+  function doChat(message, wrap, bubble, onText) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        abortCtrl = new AbortController();
+        const resp = await fetch("/api/chat", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, sessionId }), signal: abortCtrl.signal,
+        });
+        if (!resp.ok) throw new Error("http " + resp.status);
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "", closed = false, sources = [];
+        while (!closed) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf("\n")) !== -1) {
+            const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === "[DONE]") continue;
+            let obj; try { obj = JSON.parse(data); } catch { continue; }
+            if (obj.textResponse) {
+              bubble.innerHTML = "";
+              bubble.textContent = (bubble._full || "") + obj.textResponse;
+              bubble._full = bubble.textContent;
+              bubble.innerHTML += '<span class="cursor"></span>';
+              scrollBottom();
+              onText(obj.textResponse);
+            }
+            if (obj.close) { closed = true; sources = obj.sources || []; }
+          }
+        }
+        resolve(sources);
+      } catch (e) {
+        if (e.name === "AbortError") { reject(new Error("已停止")); return; }
+        // 演示模式兜底
+        await demoStream(message, bubble, onText);
+        resolve([]);
+      }
+    });
+  }
+  function setStreaming(v) {
+    streaming = v;
+    sendBtn.disabled = false;
+    sendBtn.textContent = v ? "停止" : "发送";
+    sendBtn.classList.toggle("stop", v);
+  }
+  function stopStream() {
+    if (abortCtrl) abortCtrl.abort();
+    speechSynthesis.cancel();
+    setStreaming(false);
+  }
+  function finishSources(bubble, sources) {
+    if (sources && sources.length) {
+      const d = document.createElement("div");
+      d.className = "sources";
+      d.textContent = "来源：" + sources.map(s => s.title || "").filter(Boolean).join("、");
+      bubble.parentElement.appendChild(d);
+    }
+  }
+  function demoStream(message, bubble, onText) {
+    let text = "";
+    for (const [k, v] of Object.entries(DEMO_TEXT)) {
+      if (message.includes(k)) { text = v; break; }
+    }
+    if (!text) text = "（演示模式）未连接知识库。请先启动后端服务（见 README），当前展示本地示例。";
+    bubble.innerHTML = ""; bubble._full = "";
+    return new Promise((resolve) => {
+      let i = 0;
+      const timer = setInterval(() => {
+        if (i >= text.length) { clearInterval(timer); bubble.querySelector(".cursor")?.remove(); resolve(); return; }
+        const step = 1 + Math.floor(Math.random() * 3);
+        i += step;
+        bubble._full = text.slice(0, i);
+        bubble.textContent = bubble._full;
+        bubble.innerHTML += '<span class="cursor"></span>';
+        scrollBottom(); onText(text.slice(Math.max(0, i - step), i));
+      }, 18);
+    });
+  }
+
+  // ================= 输入框自适应 =================
+  function autoResize() {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 120) + "px";
+  }
+  input.addEventListener("input", autoResize);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  $("search").addEventListener("input", renderSpots);
+  $("menuBtn").addEventListener("click", () => $("sidebar").classList.toggle("open"));
+
+  // ================= 设置抽屉 =================
+  function openSettings() {
+    $("drawerMask").classList.add("show");
+    $("drawer").classList.add("show");
+    loadFiles(); loadConfig();
+  }
+  function closeSettings() {
+    $("drawerMask").classList.remove("show");
+    $("drawer").classList.remove("show");
+  }
+  function switchCat(cat) {
+    document.querySelectorAll(".cat-item").forEach(el =>
+      el.classList.toggle("active", el.dataset.cat === cat));
+    document.querySelectorAll(".pane").forEach(el =>
+      el.classList.toggle("active", el.id === "pane-" + cat));
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { closeSettings(); $("sidebar").classList.remove("open"); }
+  });
+
+  // ================= 通知设置 =================
+  function initNotifyUI() {
+    $("notifyVoice").checked = voiceOn;
+    $("rateRange").value = settings.rate || "1.0";
+    $("volRange").value = settings.volume ?? "1";
+    applyVoiceSetting();
+  }
+  function applyVoiceSetting() {
+    voiceOn = $("notifyVoice").checked;
+    $("voiceBtn").classList.toggle("on", voiceOn);
+    $("voiceBtn").setAttribute("aria-checked", voiceOn);
+    settings.rate = $("rateRange").value;
+    settings.volume = $("volRange").value;
+    if (voices.length) settings.voice = $("voiceSelect").value;
+    $("rateOut").textContent = parseFloat(settings.rate).toFixed(1) + "×";
+    $("volOut").textContent = Math.round(parseFloat(settings.volume) * 100) + "%";
+    localStorage.setItem("scenic.settings", JSON.stringify(settings));
+    if (!voiceOn) { speechSynthesis.cancel(); }
+  }
+
+  // ================= 外观设置 =================
+  function applyAppearance() {
+    const theme = settings.theme || "system";
+    const fs = settings.fs || "medium";
+    document.querySelectorAll('input[name=theme]').forEach(r => r.checked = r.value === theme);
+    document.querySelectorAll('input[name=fs]').forEach(r => r.checked = r.value === fs);
+    let t = theme;
+    if (theme === "system") {
+      t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    document.documentElement.dataset.theme = t;
+    document.documentElement.dataset.fs = fs;
+  }
+  function applyAppearanceChange() {
+    const th = document.querySelector('input[name=theme]:checked');
+    const fs = document.querySelector('input[name=fs]:checked');
+    if (th) settings.theme = th.value;
+    if (fs) settings.fs = fs.value;
+    localStorage.setItem("scenic.settings", JSON.stringify(settings));
+    applyAppearance();
+  }
+  // 绑定 onchange（HTML 里已内联，这里兜底改名为 applyAppearance 的引用）
+  window.applyAppearance = applyAppearance;
+  window.applyAppearanceChange = applyAppearanceChange;
+
+  // ================= 隐私 =================
+  function clearChat() {
+    if (!confirm("确定清空当前对话记录吗？")) return;
+    chat.innerHTML = `<div class="welcome"><div class="big">🏛️</div><h3>你好，我是景点讲解助手</h3><p>点击左侧景点开始讲解，或直接输入问题。</p></div>`;
+    toast("对话已清空", "success");
+  }
+  function clearLocalCache() {
+    if (!confirm("确定清除本地缓存吗？将重置收藏、主题、字号等偏好。")) return;
+    favorites = []; settings = {};
+    localStorage.removeItem("scenic.favs");
+    localStorage.removeItem("scenic.settings");
+    applyAppearance(); initNotifyUI(); renderSpots();
+    toast("本地缓存已清除", "success");
+  }
+
+  // ================= 通用：默认景点 =================
+  function fillDefaultSpotSelect() {
+    const sel = $("defaultSpot");
+    const cur = settings.defaultSpot || "";
+    sel.innerHTML = '<option value="">无</option>' + spots.map(s =>
+      `<option value="${esc(s.name)}" ${s.name === cur ? "selected" : ""}>${esc(s.name)}</option>`).join("");
+  }
+  function saveDefaultSpot() {
+    settings.defaultSpot = $("defaultSpot").value || "";
+    localStorage.setItem("scenic.settings", JSON.stringify(settings));
+    toast("已保存默认景点", "success");
+  }
+
+  // ================= 提示 =================
+  let toastTimer;
+  function toast(msg, type) {
+    const el = $("toast");
+    el.textContent = msg;
+    el.className = "toast show " + (type || "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c =>
+      ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  // ================= 文档上传 =================
+  const ALLOWED_EXTS = ["doc","docx","pdf","md","png","jpg","jpeg","gif","webp","bmp","tif","tiff"];
+  const MAX_UPLOAD = 20 * 1024 * 1024;
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / 1024 / 1024).toFixed(1) + " MB";
+  }
+  function extType(name) {
+    const e = (name.split(".").pop() || "").toLowerCase();
+    if (e === "doc" || e === "docx") return "word";
+    if (e === "pdf") return "pdf";
+    if (e === "md") return "md";
+    return "img";
+  }
+  function typeColor(t) {
+    return t === "word" ? "#2563eb" : t === "pdf" ? "#dc2626" : t === "md" ? "#7c3aed" : "#0f766e";
+  }
+  async function uploadFiles(files) {
+    const spot = uploadTargetSpot;
+    for (const file of files) {
+      const ext = (file.name.split(".").pop() || "").toLowerCase();
+      if (!ALLOWED_EXTS.includes(ext)) { toast(`「${file.name}」格式不支持`, "error"); continue; }
+      if (file.size === 0) { toast(`「${file.name}」内容为空`, "error"); continue; }
+      if (file.size > MAX_UPLOAD) { toast(`「${file.name}」超过 20 MB 限制`, "error"); continue; }
+      try {
+        const resp = await fetch("/api/upload?name=" + encodeURIComponent(file.name) + "&spot=" + encodeURIComponent(spot), { method: "POST", body: file });
+        const d = await resp.json();
+        if (!resp.ok) { toast(d.error || "上传失败", "error"); continue; }
+        if (d.warning) { toast(d.warning, "error"); continue; }
+        const extra = d.entries ? `，已加入知识库 ${d.entries} 条` : "";
+        toast(`「${d.name}」上传成功${extra}`, "success");
+      } catch (e) { toast("上传失败：" + e.message, "error"); }
+    }
+    loadFiles(); loadSpots();
+  }
+  async function loadFiles() {
+    try {
+      const r = await fetch("/api/files");
+      const d = await r.json();
+      spotFiles = d.files || [];
+    } catch (e) { spotFiles = []; }
+    renderSpotFolders();
+  }
+  function renderSpotFolders() {
+    const el = $("spotFolderList");
+    if (!el) return;
+    if (!spots.length) {
+      el.innerHTML = '<div class="empty"><div class="big">📁</div>暂无景点，先在上方新建一个景点</div>';
+      return;
+    }
+    el.innerHTML = spots.map(s => {
+      const docs = spotFiles.filter(f => (f.spots || []).includes(s.name));
+      const open = expandedSpot === s.name;
+      const docHtml = docs.length
+        ? docs.map(f => `<div class="file-item">
+            <div class="file-icon" style="background:${typeColor(extType(f.name))}">${esc(f.type)}</div>
+            <div class="file-meta">
+              <div class="file-name" title="${esc(f.name)}">${esc(f.name)}</div>
+              <div class="file-sub">${f.source === "sample" ? "内置" : "上传"} · ${formatSize(f.size)}</div>
+            </div>
+            <button class="file-del" data-name="${encodeURIComponent(f.name)}">删除</button>
+          </div>`).join("")
+        : '<div class="empty">该景点暂无文档，点击上方「上传文档」添加</div>';
+      return `<div class="folder">
+        <div class="folder-head" onclick="toggleFolder('${esc(s.name)}')">
+          <span class="folder-icon">📁</span>
+          <span class="folder-name">${esc(s.name)}</span>
+          <span class="folder-count">${docs.length} 个文档</span>
+          <span class="folder-arrow">${open ? "▾" : "▸"}</span>
+        </div>
+        <div class="folder-body ${open ? "open" : ""}">
+          <div class="folder-actions">
+            <button class="btn primary" onclick="event.stopPropagation();setUploadTarget('${esc(s.name)}')">＋ 上传文档</button>
+            <button class="btn danger" onclick="event.stopPropagation();deleteSpotByName('${esc(s.name)}')">删除景点</button>
+          </div>
+          ${docHtml}
+        </div>
+      </div>`;
+    }).join("");
+    el.querySelectorAll(".file-del").forEach(b => b.onclick = (e) => { e.stopPropagation(); deleteFile(b.dataset.name); });
+  }
+  function toggleFolder(name) {
+    expandedSpot = expandedSpot === name ? null : name;
+    renderSpotFolders();
+  }
+  function setUploadTarget(name) {
+    uploadTargetSpot = name;
+    $("fileInput").click();
+  }
+  async function createSpot() {
+    const name = ($("newSpotName").value || "").trim();
+    if (!name) { toast("请输入景点名", "error"); return; }
+    try {
+      const r = await fetch("/api/spots", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || "创建失败", "error"); return; }
+      toast(`景点「${name}」已创建`, "success");
+      $("newSpotName").value = "";
+    } catch (e) { toast("创建失败：" + e.message, "error"); }
+    loadSpots();
+  }
+  async function deleteFile(encName) {
+    if (!confirm(`确定删除「${decodeURIComponent(encName)}」吗？删除后将同时从知识库移除。`)) return;
+    try {
+      const r = await fetch("/api/files/" + encName, { method: "DELETE" });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || "删除失败", "error"); return; }
+      toast("已删除", "success");
+    } catch (e) { toast("删除失败：" + e.message, "error"); }
+    loadFiles(); loadSpots();
+  }
+  async function deleteSpotByName(name) {
+    if (!confirm(`确定删除景点「${name}」吗？将从知识库移除，重启后也不会恢复。`)) return;
+    try {
+      const r = await fetch("/api/spots/" + encodeURIComponent(name), { method: "DELETE" });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || "删除失败", "error"); return; }
+      toast("景点已删除", "success");
+    } catch (e) { toast("删除失败：" + e.message, "error"); }
+    if (currentSpot === name) {
+      currentSpot = null; $("curSpot").innerHTML = ""; $("detailCard").classList.remove("show");
+    }
+    if (expandedSpot === name) expandedSpot = null;
+    loadSpots(); loadFiles();
+  }
+  function deleteSpot() { if (currentSpot) deleteSpotByName(currentSpot); }
+  function addDocToSpot() {
+    if (!currentSpot) return;
+    openSettings();
+    switchCat("general");
+    expandedSpot = currentSpot;
+    renderSpotFolders();
+  }
+  $("fileInput").addEventListener("change", e => { if (e.target.files.length) { uploadFiles(e.target.files); e.target.value = ""; } });
+
+  // ================= API Key 配置 =================
+  async function loadConfig() {
+    try {
+      const r = await fetch("/api/config");
+      const d = await r.json();
+      renderKeyStatus("deepseek", d.deepseek);
+      renderKeyStatus("zhipu", d.zhipu);
+    } catch (e) {}
+  }
+  function renderKeyStatus(p, s) {
+    const el = $(p + "Status");
+    if (s && s.hasKey) {
+      el.innerHTML = `当前：<span class="mask-pill">${esc(s.masked)}</span>` +
+        (s.configured ? ' <span class="ok">（已自定义）</span>' : '');
+    } else el.textContent = "未配置";
+  }
+  async function saveKey(p) {
+    const val = $(p + "Key").value.trim();
+    if (!val) { toast("请输入 API Key", "error"); return; }
+    try {
+      const r = await fetch("/api/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: p, key: val }),
+      });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || "保存失败", "error"); return; }
+      $(p + "Key").value = "";
+      toast("保存成功", "success");
+      renderKeyStatus(p, { hasKey: true, masked: d.masked, configured: true });
+    } catch (e) { toast("保存失败：" + e.message, "error"); }
+  }
+  async function clearKey(p) {
+    if (!confirm("确定清除该 API Key 吗？")) return;
+    try {
+      const r = await fetch("/api/config?provider=" + p, { method: "DELETE" });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || "清除失败", "error"); return; }
+      toast("已清除", "success");
+      renderKeyStatus(p, { hasKey: !!d.masked, masked: d.masked, configured: false });
+    } catch (e) { toast("清除失败：" + e.message, "error"); }
+  }
+
+  init();
+</script>
+</body>
+</html>
