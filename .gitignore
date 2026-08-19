@@ -14,6 +14,7 @@ web/.secret_key
 web/.api_config.json
 
 # 运行时状态 / 缓存 / 上传数据
+server_run.log
 web/.vector_cache.pkl
 web/.removed.json
 web/.spot_docs.json
