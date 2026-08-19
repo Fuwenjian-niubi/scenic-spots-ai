@@ -230,6 +230,68 @@ class TestSpotChunking(unittest.TestCase):
         self.assertEqual(storage.spot_chunking_for("A")["max_chars"], 100)
 
 
+# ---------- rag：向量库原子操作（并发安全） ----------
+class TestVectorOps(unittest.TestCase):
+    def setUp(self):
+        # 隔离缓存文件：vector_add/remove 会 _persist_cache，防止污染真实磁盘缓存
+        self._orig_cache = rag.CACHE_FILE
+        self._td = tempfile.TemporaryDirectory()
+        rag.CACHE_FILE = Path(self._td.name) / "cache.pkl"
+        rag._vectors = [
+            ("广州塔", "body-1", [1.0, 0.0], "src1"),
+            ("陈家祠", "body-2", [0.0, 1.0], "src2"),
+        ]
+
+    def tearDown(self):
+        rag._vectors = None
+        rag.CACHE_FILE = self._orig_cache
+        self._td.cleanup()
+
+    def test_add(self):
+        rag.vector_add([("白云山", "body-3", [1.0, 1.0], "src3")])
+        self.assertEqual(len(rag.vector_snapshot()), 3)
+
+    def test_remove_by_name(self):
+        n = rag.vector_remove(lambda e: e[0] == "广州塔")
+        self.assertEqual(n, 1)
+        self.assertEqual([e[0] for e in rag.vector_snapshot()], ["陈家祠"])
+
+    def test_remove_missing_returns_zero(self):
+        n = rag.vector_remove(lambda e: e[0] == "不存在")
+        self.assertEqual(n, 0)
+        self.assertEqual(len(rag.vector_snapshot()), 2)
+
+    def test_snapshot_is_copy(self):
+        snap = rag.vector_snapshot()
+        snap.append(("花城广场", "x", [0.0, 0.0], "src"))
+        self.assertEqual(len(rag.vector_snapshot()), 2)  # 原库不受影响
+
+
+# ---------- rag：名称命中加权 ----------
+class TestNameWeighting(unittest.TestCase):
+    def setUp(self):
+        # 单条目库：查询 qv 与条目余弦=0.30（低于阈值 0.40）
+        rag._vectors = [
+            ("广州塔", "广州塔 门票 开放时间 交通 看点", [1.0, 0.0, 0.0, 0.0], "src1"),
+        ]
+
+    def tearDown(self):
+        rag._vectors = None
+
+    @patch("rag.embed", return_value=[0.3, 0.954, 0.0, 0.0])
+    def test_name_hit_crosses_threshold(self, _mock):
+        # 查询含「广州塔」→ +0.15 → 0.45 ≥ 阈值 0.40，通过
+        passed, top = rag.retrieve("广州塔的门票多少钱", top_k=1, threshold=0.40)
+        self.assertEqual([n for n, _ in passed], ["广州塔"])
+        self.assertGreater(top[0][0], 0.40)
+
+    @patch("rag.embed", return_value=[0.3, 0.954, 0.0, 0.0])
+    def test_no_name_hit_stays_rejected(self, _mock):
+        # 查询不含景点名：不加权，0.30 < 0.40，拒绝
+        passed, _ = rag.retrieve("一般门票多少钱", top_k=1, threshold=0.40)
+        self.assertEqual(passed, [])
+
+
 # ---------- rag：按配置重嵌某景点 ----------
 class TestReembedSpot(unittest.TestCase):
     def test_reembed_respects_config(self):

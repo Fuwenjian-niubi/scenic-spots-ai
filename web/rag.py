@@ -24,7 +24,8 @@ RESP_CACHE_SIZE = 256
 
 SYSTEM_PROMPT = (
     "你是专业的景点讲解员。仅根据提供的景点资料，用简洁、准确、生动的中文回答游客问题；"
-    "资料中没有的信息要如实说明。可结合对话上下文回答游客的追问。"
+    "回答具体问题（价格、开放时间、交通、门票等）时必须引用资料中的确切数字与表述，"
+    "不得模糊化、不得编造；资料中没有的信息要如实说明。可结合对话上下文回答游客的追问。"
 )
 SYSTEM_MSG = {"role": "system", "content": SYSTEM_PROMPT}
 
@@ -89,7 +90,8 @@ def split_chunk(text: str, max_chars: int = 800, overlap: int = 50) -> list:
 
 
 # ---------- 向量缓存（支持增量，惰性初始化：须等 crypto 密钥就绪后首次 ensure） ----------
-_vectors_lock = threading.Lock()
+# RLock：ensure_vectors / _persist_cache 等内部可重入；对外提供 vector_* 原子操作（线程安全）
+_vectors_lock = threading.RLock()
 _vectors = None
 
 
@@ -102,6 +104,32 @@ def ensure_vectors():
         if _vectors is None:
             _vectors = load_or_build_cache()
     return _vectors
+
+
+def vector_add(entries) -> None:
+    """原子追加向量条目并落盘（线程安全）。传入的 entries 已含向量，锁内只做列表扩展。"""
+    if not entries:
+        return
+    with _vectors_lock:
+        ensure_vectors().extend(entries)
+        _persist_cache()
+
+
+def vector_remove(pred) -> int:
+    """原子移除满足 pred(entry) 的条目并落盘，返回移除数（线程安全）。"""
+    with _vectors_lock:
+        vs = ensure_vectors()
+        before = len(vs)
+        vs[:] = [e for e in vs if not pred(e)]
+        if len(vs) != before:
+            _persist_cache()
+        return before - len(vs)
+
+
+def vector_snapshot() -> list:
+    """返回向量库线程安全快照（浅拷贝列表，迭代期间不受并发增删影响）。"""
+    with _vectors_lock:
+        return list(ensure_vectors())
 
 
 def _chunking_snapshot() -> dict:
@@ -119,13 +147,14 @@ def _chunking_snapshot() -> dict:
 
 
 def _persist_cache(entries=None):
-    """将当前向量(或给定 entries)、.md 文件清单与切分配置快照写入磁盘缓存"""
-    if entries is None:
-        entries = list(ensure_vectors())
-    files_meta = {str(f): f.stat().st_mtime for f in _md_files()}
-    CACHE_FILE.write_bytes(pickle.dumps({
-        "model": EMBED_MODEL, "entries": entries, "files": files_meta,
-        "chunking": _chunking_snapshot()}))
+    """将当前向量(或给定 entries)、.md 文件清单与切分配置快照写入磁盘缓存（线程安全）"""
+    with _vectors_lock:
+        if entries is None:
+            entries = list(ensure_vectors())
+        files_meta = {str(f): f.stat().st_mtime for f in _md_files()}
+        CACHE_FILE.write_bytes(pickle.dumps({
+            "model": EMBED_MODEL, "entries": entries, "files": files_meta,
+            "chunking": _chunking_snapshot()}))
 
 
 def _embed_entries(name, body, src, cfg):
@@ -185,9 +214,9 @@ def load_or_build_cache() -> list:
 
 
 def reembed_spot(name: str) -> int:
-    """按该景点最新切分配置重新嵌入：移除旧向量 → 重新解析所有文档中该景点条目 → 向量化。"""
-    vs = ensure_vectors()
-    vs[:] = [e for e in vs if e[0] != name]
+    """按该景点最新切分配置重新嵌入：移除旧向量 → 重新解析所有文档中该景点条目 → 向量化。
+    向量读写走 vector_* 原子操作；嵌入(网络调用)在锁外执行，避免长时间阻塞请求。"""
+    vector_remove(lambda e: e[0] == name)
     cfg = spot_chunking_for(name)
     new = []
     for f in _md_files():
@@ -199,8 +228,7 @@ def reembed_spot(name: str) -> int:
             if n == name:
                 new.extend(_embed_entries(n, body, str(f), cfg))
     if new:
-        vs.extend(new)
-    _persist_cache()
+        vector_add(new)
     return len(new)
 
 
@@ -212,11 +240,28 @@ def cosine(a, b) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+# 名称命中加权：查询含知识库已知景点名时，该景点条目相似度上浮该值。
+# 理由：景点名是强信号，向量相似度绝对值偏低（0.3~0.6），名称命中可显著修正排序；
+# 对库外问题（不含任何景点名）不生效，阈值过滤行为不变。
+NAME_HIT_BONUS = 0.15
+
+
+def _spot_names(snapshot) -> set:
+    return {e[0] for e in snapshot if e[0]}
+
+
 def retrieve(question: str, top_k: int = 4, threshold: float = 0.35):
     qv = embed(question)
-    snapshot = list(ensure_vectors())
-    scored = sorted(((cosine(qv, v), n, b) for n, b, v, _ in snapshot),
-                    key=lambda s: s[0], reverse=True)
+    snapshot = vector_snapshot()
+    names = _spot_names(snapshot)
+    named = {n for n in names if n and n in question}
+    scored = []
+    for n, b, v, _ in snapshot:
+        s = cosine(qv, v)
+        if named and n in named:
+            s += NAME_HIT_BONUS
+        scored.append((s, n, b))
+    scored.sort(key=lambda s: s[0], reverse=True)
     top = scored[:top_k]
     passed = [(n, b) for s, n, b in top if s >= threshold]
     return passed, top

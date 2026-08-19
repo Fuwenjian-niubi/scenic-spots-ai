@@ -24,11 +24,11 @@ from crypto import (
     init_runtime_keys,
     mask_key,
 )
+from extract import extract_text
 from rag import (
     EMBED_MODEL,
     SYSTEM_MSG,
     _norm,
-    _persist_cache,
     _safe_history,
     cache_get,
     cache_put,
@@ -40,6 +40,9 @@ from rag import (
     retrieve,
     split_chunk,
     sse_event,
+    vector_add,
+    vector_remove,
+    vector_snapshot,
 )
 from storage import (
     ALLOWED_EXTS,
@@ -146,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
             for name in _custom_spots():
                 add(name, "")
             # 2) md 解析的景点
-            for e in ensure_vectors():
+            for e in vector_snapshot():
                 intro = ""
                 for line in e[1].split("\n"):
                     if line.startswith("简介："):
@@ -349,26 +352,54 @@ class Handler(BaseHTTPRequestHandler):
                 out.write(chunk)
                 remaining -= len(chunk)
         added, embed_err = 0, None
+        entry_name = spot or dest.stem
         if ext == ".md":
             text = dest.read_text(encoding="utf-8", errors="ignore")
             if not re.search(r"(?m)^##\s+", text):
                 # 无标题 md：整文件作为一个景区，记录归属名（用户指定优先）
                 sd = _spot_docs()
-                sd[dest.name] = spot or dest.stem
+                sd[dest.name] = entry_name
                 _save_spot_docs(sd)
             try:
                 added = self._add_md_to_knowledge(dest, spot_name=spot)
             except Exception as e:
                 embed_err = str(e)
-        elif spot:
-            # 非 md 文档记录归属景区
+        elif ext in (".docx", ".pdf"):
+            # 记录归属景区，再提取文本入库
             sd = _spot_docs()
-            sd[dest.name] = spot
+            sd[dest.name] = entry_name
             _save_spot_docs(sd)
+            try:
+                text = extract_text(dest)
+                if text.strip():
+                    added = self._embed_spot_text(dest, entry_name, text)
+                else:
+                    embed_err = "未能从文档提取文本（可能是扫描件或加密 PDF），文件已保存但不参与检索"
+            except Exception as e:
+                embed_err = str(e)
+        else:
+            # 图片：无 OCR 能力，仅记录「文件名+归属」标签条目，可检索到资料存在
+            sd = _spot_docs()
+            sd[dest.name] = entry_name
+            _save_spot_docs(sd)
+            try:
+                label = f"【资料文件】{dest.name}（{entry_name}）"
+                added = self._embed_spot_text(dest, entry_name, label)
+            except Exception as e:
+                embed_err = str(e)
         resp = {"ok": True, "name": dest.name, "size": length, "entries": added}
         if embed_err:
-            resp["warning"] = f"文件已上传，但嵌入失败（{embed_err}），重启服务后将自动重试"
+            resp["warning"] = f"文件已保存，但{embed_err}"
         self._json(resp)
+
+    def _embed_spot_text(self, path, name, body):
+        """将一段文本作为单个景点条目，按该景点切分配置分块后入库，返回条目数"""
+        cfg = spot_chunking_for(name)
+        new = []
+        for chunk in split_chunk(body, cfg["max_chars"], cfg["overlap"]):
+            new.append((name, chunk, embed(chunk), str(path)))
+        vector_add(new)
+        return len(new)
 
     def _add_md_to_knowledge(self, path, spot_name=""):
         """解析 .md 并动态加入向量库（按景点切分配置分块），返回新增条目数"""
@@ -381,20 +412,12 @@ class Handler(BaseHTTPRequestHandler):
             cfg = spot_chunking_for(n)
             for chunk in split_chunk(b, cfg["max_chars"], cfg["overlap"]):
                 new.append((n, chunk, embed(chunk), str(path)))
-        vs = ensure_vectors()
-        vs.extend(new)
-        _persist_cache()
+        vector_add(new)
         return len(new)
 
-    def _remove_md_from_knowledge(self, path):
-        """从向量库移除某 .md 文件的全部条目，返回移除数"""
-        src = str(path)
-        vs = ensure_vectors()
-        before = len(vs)
-        vs[:] = [e for e in vs if e[3] != src]
-        if len(vs) != before:
-            _persist_cache()
-        return before - len(vs)
+    def _remove_file_from_knowledge(self, path):
+        """从向量库移除某文件的全部条目，返回移除数（线程安全）"""
+        return vector_remove(lambda e: e[3] == str(path))
 
     def _handle_delete_file(self, path):
         parsed = urlparse(self.path)
@@ -417,8 +440,8 @@ class Handler(BaseHTTPRequestHandler):
         if target is None:
             self._json({"error": "文件不存在"}, 404)
             return
-        is_md = target.suffix.lower() == ".md"
-        hard = False
+        # 从向量库移除该文件的全部条目（md / docx / pdf / 图片均可能已入库）
+        self._remove_file_from_knowledge(target)
         if in_upload:
             try:
                 target.unlink()
@@ -436,8 +459,6 @@ class Handler(BaseHTTPRequestHandler):
             if name not in rem.get("files", []):
                 rem.setdefault("files", []).append(name)
                 _save_removed(rem)
-        if is_md:
-            self._remove_md_from_knowledge(target)
         # 清理文档归属映射
         sd = _spot_docs()
         if name in sd:
@@ -450,11 +471,7 @@ class Handler(BaseHTTPRequestHandler):
         if not name:
             self._json({"error": "景点名不能为空"}, 400)
             return
-        vs = ensure_vectors()
-        before = len(vs)
-        vs[:] = [e for e in vs if e[0] != name]
-        if len(vs) != before:
-            _persist_cache()
+        vector_remove(lambda e: e[0] == name)
         rem = _removed()
         if name not in rem.get("spots", []):
             rem.setdefault("spots", []).append(name)
