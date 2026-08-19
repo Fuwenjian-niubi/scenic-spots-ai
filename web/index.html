@@ -321,8 +321,21 @@
   .folder-arrow { font-size: 12px; color: var(--muted); flex: none; }
   .folder-body { display: none; padding: 10px 12px; border-top: 1px solid var(--border); background: var(--panel); }
   .folder-body.open { display: block; }
-  .folder-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+  .folder-actions { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
   .folder-actions .btn { padding: 7px 14px; font-size: 12px; }
+
+  /* 每景点文档切分设置 */
+  .chunking-box { display: none; margin-top: 10px; background: var(--panel-2); border-radius: 8px; padding: 10px 12px; }
+  .chunking-box.open { display: block; }
+  .chunking-title { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .chunking-fields { display: flex; gap: 14px; flex-wrap: wrap; }
+  .chunking-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  .chunking-fields input {
+    width: 120px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel); color: var(--text); font-size: 13px;
+  }
+  .chunking-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .chunking-actions .btn { padding: 7px 14px; font-size: 12px; }
 
   .toast {
     position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
@@ -553,6 +566,8 @@
   let streaming = false;
   let uploadTargetSpot = "";      // 当前上传目标景点
   let expandedSpot = null;        // 展开的景点文件夹
+  let spotChunking = {};          // 景点 → {maxChars, overlap} 切分配置
+  let chunkingDefaults = { maxChars: 800, overlap: 50 };
   let favorites = JSON.parse(localStorage.getItem("scenic.favs") || "[]");
   let settings = JSON.parse(localStorage.getItem("scenic.settings") || "{}");
   const QUICK_PROMPTS = ["怎么去", "门票多少", "开放时间", "推荐看点"];
@@ -1056,7 +1071,18 @@
       const d = await r.json();
       spotFiles = d.files || [];
     } catch (e) { spotFiles = []; }
+    loadSpotChunking();
     renderSpotFolders();
+  }
+  async function loadSpotChunking() {
+    try {
+      const r = await fetch("/api/spot-config");
+      const d = await r.json();
+      if (r.ok) {
+        spotChunking = d.configs || {};
+        if (d.default) chunkingDefaults = d.default;
+      }
+    } catch (e) { /* 后端不可达时保留默认 */ }
   }
   function renderSpotFolders() {
     const el = $("spotFolderList");
@@ -1065,8 +1091,9 @@
       el.innerHTML = '<div class="empty"><div class="big">📁</div>暂无景点，先在上方新建一个景点</div>';
       return;
     }
-    el.innerHTML = spots.map(s => {
+    el.innerHTML = spots.map((s, i) => {
       const docs = spotFiles.filter(f => (f.spots || []).includes(s.name));
+      const cfg = spotChunking[s.name] || chunkingDefaults;
       const open = expandedSpot === s.name;
       const docHtml = docs.length
         ? docs.map(f => `<div class="file-item">
@@ -1088,7 +1115,24 @@
         <div class="folder-body ${open ? "open" : ""}">
           <div class="folder-actions">
             <button class="btn primary" onclick="event.stopPropagation();setUploadTarget('${esc(s.name)}')">＋ 上传文档</button>
+            <button class="btn" onclick="event.stopPropagation();toggleChunking(${i})">⚙ 切分设置</button>
             <button class="btn danger" onclick="event.stopPropagation();deleteSpotByName('${esc(s.name)}')">删除景点</button>
+          </div>
+          <div class="chunking-box" id="chunkingBox-${i}">
+            <div class="chunking-title">文档切分：长文本按「最大段字符数」切成多段，分别向量化（<a href="#" onclick="event.preventDefault()">默认 ${chunkingDefaults.maxChars} 字符 / 重叠 ${chunkingDefaults.overlap}</a>）</div>
+            <div class="chunking-fields">
+              <label>最大段字符数
+                <input type="number" id="cc-max-${i}" min="100" max="5000" value="${cfg.maxChars}">
+              </label>
+              <label>重叠字符数
+                <input type="number" id="cc-ov-${i}" min="0" value="${cfg.overlap}">
+              </label>
+            </div>
+            <div class="chunking-actions">
+              <button class="btn primary" onclick="event.stopPropagation();saveChunking(${i})">保存并重新嵌入</button>
+              <button class="btn" onclick="event.stopPropagation();resetChunking(${i})">恢复默认</button>
+            </div>
+            <p class="status-line" style="margin-top:8px">保存后立即按新参数切分并重新嵌入该景点文档（需已连接后端）</p>
           </div>
           ${docHtml}
         </div>
@@ -1099,6 +1143,56 @@
   function toggleFolder(name) {
     expandedSpot = expandedSpot === name ? null : name;
     renderSpotFolders();
+  }
+  function toggleChunking(i) {
+    const box = $("chunkingBox-" + i);
+    if (!box) return;
+    const name = spots[i]?.name;
+    if (!box.classList.contains("open") && name) {
+      const cfg = spotChunking[name] || chunkingDefaults;
+      const m = $("cc-max-" + i), o = $("cc-ov-" + i);
+      if (m) m.value = cfg.maxChars;
+      if (o) o.value = cfg.overlap;
+    }
+    box.classList.toggle("open");
+  }
+  async function saveChunking(i) {
+    const name = spots[i]?.name;
+    if (!name) return;
+    const m = $("cc-max-" + i), o = $("cc-ov-" + i);
+    const maxChars = parseInt(m?.value, 10), overlap = parseInt(o?.value, 10);
+    if (!maxChars || maxChars < 100 || maxChars > 5000) { toast("最大段字符数须在 100–5000 之间", "error"); return; }
+    if (overlap < 0) { toast("重叠字符数不能为负", "error"); return; }
+    try {
+      const r = await fetch("/api/spot-config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ spot: name, maxChars, overlap }),
+      });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || "保存失败", "error"); return; }
+      spotChunking[name] = { maxChars: d.maxChars, overlap: d.overlap };
+      toast(d.warning || `已保存，重新嵌入 ${d.entries} 段`, "success");
+      loadSpots();
+    } catch (e) { toast("保存失败：" + e.message, "error"); }
+  }
+  async function resetChunking(i) {
+    const name = spots[i]?.name;
+    if (!name) return;
+    if (!confirm(`确定将「${name}」的切分设置恢复为默认（${chunkingDefaults.maxChars} 字符 / 重叠 ${chunkingDefaults.overlap}）吗？`)) return;
+    const m = $("cc-max-" + i), o = $("cc-ov-" + i);
+    if (m) m.value = chunkingDefaults.maxChars;
+    if (o) o.value = chunkingDefaults.overlap;
+    try {
+      const r = await fetch("/api/spot-config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ spot: name, maxChars: chunkingDefaults.maxChars, overlap: chunkingDefaults.overlap }),
+      });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error || "恢复失败", "error"); return; }
+      delete spotChunking[name];
+      toast(`已恢复默认，重新嵌入 ${d.entries} 段`, "success");
+      loadSpots();
+    } catch (e) { toast("恢复失败：" + e.message, "error"); }
   }
   function setUploadTarget(name) {
     uploadTargetSpot = name;

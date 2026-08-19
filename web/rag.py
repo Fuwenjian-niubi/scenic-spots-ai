@@ -14,7 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from crypto import _runtime_keys
-from storage import CACHE_FILE, _md_files, _removed
+from storage import CACHE_FILE, _md_files, _removed, spot_chunking_for
 
 # ---------- 模型配置 ----------
 ZHIPU_EMBED_URL = "https://open.bigmodel.cn/api/paas/v4/embeddings"
@@ -59,6 +59,35 @@ def parse_spots_text(text: str, fallback_name: str = ""):
     return [(fallback_name or "未命名景点", body)] if body else []
 
 
+def split_chunk(text: str, max_chars: int = 800, overlap: int = 50) -> list:
+    """按最大字符数切分长文本，尽量在换行/句号处断，相邻块重叠 overlap 字符。
+
+    单块 ≤ max_chars；短文本原样返回；overlap 超过块长的一半时自动收窄，避免死循环。
+    """
+    max_chars = max(int(max_chars or 0), 100)
+    overlap = min(max(int(overlap or 0), 0), max_chars // 2)
+    if len(text) <= max_chars:
+        return [text]
+    chunks, start, n = [], 0, len(text)
+    while start < n:
+        end = min(start + max_chars, n)
+        if end < n:
+            cut = end
+            # 在 [end-60, end] 区间找最近的换行/句末标点，让块边界更自然
+            for i in range(end, max(start + 1, end - 60), -1):
+                if text[i - 1] in "\n。！？!?；;":
+                    cut = i
+                    break
+            end = cut
+        chunks.append(text[start:end])
+        if end >= n:
+            break
+        start = end - overlap
+        if start <= 0 or start >= end:
+            start = end
+    return chunks
+
+
 # ---------- 向量缓存（支持增量，惰性初始化：须等 crypto 密钥就绪后首次 ensure） ----------
 _vectors_lock = threading.Lock()
 _vectors = None
@@ -75,23 +104,47 @@ def ensure_vectors():
     return _vectors
 
 
+def _chunking_snapshot() -> dict:
+    """当前各景点的生效切分配置快照：{景点名: (max_chars, overlap)}，用于检测配置变更"""
+    snap = {}
+    for f in _md_files():
+        try:
+            text = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for name, _ in parse_spots_text(text, f.stem):
+            cfg = spot_chunking_for(name)
+            snap[name] = (cfg["max_chars"], cfg["overlap"])
+    return snap
+
+
 def _persist_cache(entries=None):
-    """将当前向量(或给定 entries)与 .md 文件清单写入磁盘缓存"""
+    """将当前向量(或给定 entries)、.md 文件清单与切分配置快照写入磁盘缓存"""
     if entries is None:
-        entries = list(_vectors)
+        entries = list(ensure_vectors())
     files_meta = {str(f): f.stat().st_mtime for f in _md_files()}
     CACHE_FILE.write_bytes(pickle.dumps({
-        "model": EMBED_MODEL, "entries": entries, "files": files_meta}))
+        "model": EMBED_MODEL, "entries": entries, "files": files_meta,
+        "chunking": _chunking_snapshot()}))
+
+
+def _embed_entries(name, body, src, cfg):
+    """按切分配置把正文切成多块并逐一向量化，返回 [(名称, 块, 向量, 源文件)]"""
+    out = []
+    for chunk in split_chunk(body, cfg["max_chars"], cfg["overlap"]):
+        out.append((name, chunk, embed(chunk), src))
+    return out
 
 
 def load_or_build_cache() -> list:
-    entries, files_meta = [], {}
+    entries, files_meta, chunk_snap = [], {}, {}
     if CACHE_FILE.exists():
         try:
             cache = pickle.loads(CACHE_FILE.read_bytes())
             if cache.get("model") == EMBED_MODEL and "files" in cache:
                 entries = list(cache.get("entries") or [])
                 files_meta = dict(cache.get("files") or {})
+                chunk_snap = dict(cache.get("chunking") or {})
                 # 丢弃源文件已不存在的条目（如曾硬删除的上传文档），避免陈旧向量残留
                 entries = [e for e in entries if Path(e[3]).exists()]
                 print(f"[缓存] 磁盘命中, 加载 {len(entries)} 条")
@@ -101,6 +154,12 @@ def load_or_build_cache() -> list:
     md_files = _md_files()
     current = {str(f): f.stat().st_mtime for f in md_files}
     new_files = [f for f in md_files if files_meta.get(str(f)) != current[str(f)]]
+
+    # 切分配置变化 → 丢弃旧向量，全部重新嵌入（保证按最新参数切分）
+    if _chunking_snapshot() != chunk_snap:
+        print("[缓存] 切分配置已变化, 重新嵌入")
+        entries, files_meta = [], {}
+        new_files = list(md_files)
 
     if new_files:
         raw = []  # [(名称, 正文, 源文件路径)]
@@ -113,7 +172,7 @@ def load_or_build_cache() -> list:
             print(f"[嵌入] 正在向量化 {len(raw)} 个新景点条目 ...")
             t0 = time.time()
             for name, body, src in raw:
-                entries.append((name, body, embed(body), src))
+                entries.extend(_embed_entries(name, body, src, spot_chunking_for(name)))
             print(f"[嵌入] 完成, 耗时 {time.time() - t0:.2f}s")
         for f in new_files:
             files_meta[str(f)] = current[str(f)]
@@ -123,6 +182,26 @@ def load_or_build_cache() -> list:
     if removed_spots:
         entries = [e for e in entries if e[0] not in removed_spots]
     return entries
+
+
+def reembed_spot(name: str) -> int:
+    """按该景点最新切分配置重新嵌入：移除旧向量 → 重新解析所有文档中该景点条目 → 向量化。"""
+    vs = ensure_vectors()
+    vs[:] = [e for e in vs if e[0] != name]
+    cfg = spot_chunking_for(name)
+    new = []
+    for f in _md_files():
+        try:
+            text = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for n, body in parse_spots_text(text, f.stem):
+            if n == name:
+                new.extend(_embed_entries(n, body, str(f), cfg))
+    if new:
+        vs.extend(new)
+    _persist_cache()
+    return len(new)
 
 
 # ---------- 检索 ----------

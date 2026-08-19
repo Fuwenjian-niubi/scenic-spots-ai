@@ -16,12 +16,36 @@ SECRET_FILE = WEB_DIR / ".secret_key"
 SPOT_DOCS_FILE = WEB_DIR / ".spot_docs.json"   # 文档 → 景区 映射
 REMOVED_FILE = WEB_DIR / ".removed.json"       # {"spots": [...], "files": [...]} 删除/排除清单
 SPOTS_FILE = WEB_DIR / ".spots.json"           # 手动创建的景点文件夹名列表
+CHUNKING_FILE = WEB_DIR / ".spot_chunking.json"  # 景点 → 文档切分配置 {"max_chars","overlap"}
 
 # ---------- 上传限制 ----------
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 单文件 20 MB
 UPLOAD_TOTAL_LIMIT = 500 * 1024 * 1024  # 上传目录总空间 500 MB
 ALLOWED_EXTS = {".doc", ".docx", ".pdf", ".md",
                 ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
+
+# ---------- 文档切分（每景点可独立配置） ----------
+DEFAULT_CHUNKING = {"max_chars": 800, "overlap": 50}
+
+
+def _spot_chunking() -> dict:
+    v = _load_json(CHUNKING_FILE, {})
+    return v if isinstance(v, dict) else {}
+
+
+def _save_spot_chunking(d: dict) -> None:
+    _save_json(CHUNKING_FILE, d)
+
+
+def spot_chunking_for(spot: str) -> dict:
+    """某景点的生效切分配置（自定义缺失时用默认值）"""
+    cfg = _spot_chunking().get(spot)
+    if isinstance(cfg, dict) and cfg.get("max_chars"):
+        return {
+            "max_chars": max(int(cfg["max_chars"]), 100),
+            "overlap": max(int(cfg.get("overlap") or 0), 0),
+        }
+    return dict(DEFAULT_CHUNKING)
 
 
 # ---------- JSON 持久化 ----------

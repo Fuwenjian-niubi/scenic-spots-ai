@@ -173,5 +173,86 @@ class TestUploadTotal(unittest.TestCase):
             self.assertEqual(storage.upload_total_size(), 0)
 
 
+# ---------- rag：文本切分 ----------
+class TestSplitChunk(unittest.TestCase):
+    def test_short_text_unchanged(self):
+        self.assertEqual(rag.split_chunk("广州塔简介", 800, 50), ["广州塔简介"])
+
+    def test_long_text_split_within_limit(self):
+        text = "这是第一段内容。这是第二段内容。这是第三段内容。" * 30
+        chunks = rag.split_chunk(text, 50, 10)
+        self.assertGreater(len(chunks), 1)
+        # max_chars 下限 100：小于 100 的入参被抬到 100
+        for c in chunks:
+            self.assertLessEqual(len(c), 100)
+            self.assertIn(c, text)  # 每块都是原文子串（边界自然）
+
+    def test_overlap_keeps_context(self):
+        text = "段落" * 200  # 400 字无标点，强制硬切
+        chunks = rag.split_chunk(text, 100, 20)
+        self.assertGreater(len(chunks), 1)
+        # 相邻块应有重叠：前块末尾与后块开头重复 20 字符
+        self.assertEqual(chunks[0][-20:], chunks[1][:20])
+
+    def test_no_infinite_loop(self):
+        text = "x" * 500
+        chunks = rag.split_chunk(text, 100, 60)  # overlap 60 收窄到 50
+        self.assertTrue(all(len(c) <= 100 for c in chunks))
+        self.assertGreater(len(chunks), 1)
+        # overlap 收窄为 max_chars//2=50：相邻块重叠 50 字符（有重叠，拼接≠原文属预期）
+        self.assertEqual(chunks[0][-50:], chunks[1][:50])
+
+
+# ---------- storage：每景点切分配置 ----------
+class TestSpotChunking(unittest.TestCase):
+    def setUp(self):
+        self._orig = storage.CHUNKING_FILE
+        self._td = tempfile.TemporaryDirectory()
+        storage.CHUNKING_FILE = Path(self._td.name) / "chunking.json"
+
+    def tearDown(self):
+        storage.CHUNKING_FILE = self._orig
+        self._td.cleanup()
+
+    def test_default_when_unset(self):
+        self.assertEqual(storage.spot_chunking_for("广州塔"),
+                         {"max_chars": 800, "overlap": 50})
+
+    def test_custom_config(self):
+        storage._save_spot_chunking({"广州塔": {"max_chars": 300, "overlap": 30}})
+        self.assertEqual(storage.spot_chunking_for("广州塔"),
+                         {"max_chars": 300, "overlap": 30})
+        # 其他景点仍用默认
+        self.assertEqual(storage.spot_chunking_for("陈家祠")["max_chars"], 800)
+
+    def test_floor_max_chars(self):
+        storage._save_spot_chunking({"A": {"max_chars": 10, "overlap": 5}})
+        self.assertEqual(storage.spot_chunking_for("A")["max_chars"], 100)
+
+
+# ---------- rag：按配置重嵌某景点 ----------
+class TestReembedSpot(unittest.TestCase):
+    def test_reembed_respects_config(self):
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(rag, "embed", side_effect=lambda t: [1.0, 0.0, 0.0, 0.0]), \
+                patch.object(rag, "CACHE_FILE", Path(td) / "cache.pkl"), \
+                patch.object(storage, "CHUNKING_FILE", Path(td) / "chunking.json"), \
+                patch.object(storage, "SAMPLE_DIR", Path(td)), \
+                patch.object(storage, "UPLOAD_DIR", Path(td)):
+            # 一篇超长文档：默认配置(800)不分块；自定义 200 字符切分
+            long_body = "## 长景点\n" + "内容。" * 300  # 约 1000+ 字
+            (Path(td) / "long.md").write_text(long_body, encoding="utf-8")
+            storage._save_spot_chunking({"长景点": {"max_chars": 200, "overlap": 20}})
+            rag._vectors = None
+            try:
+                n = rag.reembed_spot("长景点")
+                self.assertGreater(n, 1)  # 按 200 字符切成了多块
+                vs = rag.ensure_vectors()
+                self.assertEqual(len(vs), n)
+                self.assertTrue(all(e[0] == "长景点" and len(e[1]) <= 200 for e in vs))
+            finally:
+                rag._vectors = None
+
+
 if __name__ == "__main__":
     unittest.main()

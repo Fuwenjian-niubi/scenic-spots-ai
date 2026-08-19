@@ -36,11 +36,14 @@ from rag import (
     embed,
     ensure_vectors,
     parse_spots_text,
+    reembed_spot,
     retrieve,
+    split_chunk,
     sse_event,
 )
 from storage import (
     ALLOWED_EXTS,
+    DEFAULT_CHUNKING,
     MAX_UPLOAD_SIZE,
     SAMPLE_DIR,
     UPLOAD_DIR,
@@ -49,8 +52,11 @@ from storage import (
     _removed,
     _save_custom_spots,
     _save_removed,
+    _save_spot_chunking,
     _save_spot_docs,
+    _spot_chunking,
     _spot_docs,
+    spot_chunking_for,
     upload_total_size,
 )
 
@@ -155,6 +161,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_files()
         elif path == "/api/config":
             self._handle_config_status()
+        elif path == "/api/spot-config":
+            self._handle_spot_config_get()
         else:
             self._json({"error": "not found"}, 404)
 
@@ -168,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_config_save()
         elif path == "/api/spots":
             self._handle_create_spot()
+        elif path == "/api/spot-config":
+            self._handle_spot_config_save()
         else:
             self._json({"error": "not found"}, 404)
 
@@ -361,12 +371,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json(resp)
 
     def _add_md_to_knowledge(self, path, spot_name=""):
-        """解析 .md 并动态加入向量库，返回新增条目数（无标题时用 spot_name 兜底）"""
+        """解析 .md 并动态加入向量库（按景点切分配置分块），返回新增条目数"""
         text = path.read_text(encoding="utf-8", errors="ignore")
         entries = parse_spots_text(text, spot_name or path.stem)
         if not entries:
             return 0
-        new = [(n, b, embed(b), str(path)) for n, b in entries]
+        new = []
+        for n, b in entries:
+            cfg = spot_chunking_for(n)
+            for chunk in split_chunk(b, cfg["max_chars"], cfg["overlap"]):
+                new.append((n, chunk, embed(chunk), str(path)))
         vs = ensure_vectors()
         vs.extend(new)
         _persist_cache()
@@ -479,6 +493,55 @@ class Handler(BaseHTTPRequestHandler):
             custom.append(name)
             _save_custom_spots(custom)
         self._json({"ok": True, "name": name})
+
+    # ---------- 文档切分配置（每景点独立） ----------
+    def _handle_spot_config_get(self):
+        qs = parse_qs(urlparse(self.path).query)
+        spot = (qs.get("spot") or [""])[0].strip()
+        all_cfg = _spot_chunking()
+        if spot:
+            cfg = spot_chunking_for(spot)
+            self._json({"spot": spot, "maxChars": cfg["max_chars"],
+                        "overlap": cfg["overlap"]})
+            return
+        self._json({
+            "configs": {k: {"maxChars": v["max_chars"], "overlap": v["overlap"]}
+                        for k, v in all_cfg.items()},
+            "default": {"maxChars": DEFAULT_CHUNKING["max_chars"],
+                        "overlap": DEFAULT_CHUNKING["overlap"]},
+        })
+
+    def _handle_spot_config_save(self):
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            body = {}
+        spot = (body.get("spot") or "").strip()
+        if not spot:
+            self._json({"error": "缺少景点名"}, 400)
+            return
+        try:
+            max_chars = int(body.get("maxChars") or DEFAULT_CHUNKING["max_chars"])
+            overlap = int(body.get("overlap") or DEFAULT_CHUNKING["overlap"])
+        except (TypeError, ValueError):
+            self._json({"error": "参数必须为整数"}, 400)
+            return
+        max_chars = max(100, min(max_chars, 5000))
+        overlap = max(0, min(overlap, max_chars // 2))
+        cfg = _spot_chunking()
+        if max_chars == DEFAULT_CHUNKING["max_chars"] and overlap == DEFAULT_CHUNKING["overlap"]:
+            cfg.pop(spot, None)  # 与默认一致则删除记录，后续跟随全局默认
+        else:
+            cfg[spot] = {"max_chars": max_chars, "overlap": overlap}
+        _save_spot_chunking(cfg)
+        # 立即按新配置重新嵌入该景点
+        try:
+            n = reembed_spot(spot)
+        except Exception as e:
+            self._json({"ok": True, "warning": f"配置已保存，但重新嵌入失败（{e}），重启服务后将按新配置生效"})
+            return
+        self._json({"ok": True, "entries": n, "maxChars": max_chars, "overlap": overlap})
 
     # ---------- API Key 配置 ----------
     def _key_status(self, provider):
