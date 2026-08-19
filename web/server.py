@@ -1,29 +1,58 @@
 #!/usr/bin/env python3
 """
 景点讲解 · Web 后端（直连版，零第三方依赖）
-智谱 embedding-3 + 本地余弦检索 + DeepSeek 流式讲解
-无需 Docker / AnythingLLM / Ollama
+分层：storage.py（路径/JSON/元数据） + crypto.py（密钥加密） + rag.py（嵌入/检索/缓存/流式）
+本文件仅保留：.env 加载、HTTP 路由 Handler、启动入口。
 
 启动: python web/server.py    访问: http://127.0.0.1:8080
 """
-
 import argparse
-import base64
-import hashlib
-import hmac
 import json
-import math
 import os
-import pickle
 import re
-import secrets
-import threading
-import time
-import urllib.request
-from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
+
+import storage
+from crypto import (
+    _load_config,
+    _runtime_keys,
+    _save_config,
+    _saved_providers,
+    encrypt_str,
+    init_runtime_keys,
+    mask_key,
+)
+from rag import (
+    EMBED_MODEL,
+    SYSTEM_MSG,
+    _norm,
+    _persist_cache,
+    _safe_history,
+    cache_get,
+    cache_put,
+    deepseek_stream,
+    embed,
+    ensure_vectors,
+    parse_spots_text,
+    retrieve,
+    sse_event,
+)
+from storage import (
+    ALLOWED_EXTS,
+    MAX_UPLOAD_SIZE,
+    SAMPLE_DIR,
+    UPLOAD_DIR,
+    UPLOAD_TOTAL_LIMIT,
+    _custom_spots,
+    _removed,
+    _save_custom_spots,
+    _save_removed,
+    _save_spot_docs,
+    _spot_docs,
+    upload_total_size,
+)
 
 
 # ---------- 加载 .env（零第三方依赖，纯标准库） ----------
@@ -52,6 +81,7 @@ def load_dotenv():
         if key and key not in os.environ:
             os.environ[key] = val
 
+
 load_dotenv()
 
 # ---------- 配置 ----------
@@ -59,360 +89,14 @@ PORT = 8080
 # API Key 从环境变量读取，避免泄露真实 Key。也可在网页「设置」中录入（加密存储于 .api_config.json）。
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 ZHIPU_KEY = os.environ.get("ZHIPU_API_KEY", "")
-ZHIPU_EMBED_URL = "https://open.bigmodel.cn/api/paas/v4/embeddings"
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
-EMBED_MODEL = "embedding-3"
 
-SYSTEM_PROMPT = (
-    "你是专业的景点讲解员。仅根据提供的景点资料，用简洁、准确、生动的中文回答游客问题；"
-    "资料中没有的信息要如实说明。可结合对话上下文回答游客的追问。"
-)
-SYSTEM_MSG = {"role": "system", "content": SYSTEM_PROMPT}
-
-WEB_DIR = Path(__file__).resolve().parent
-SAMPLE_DIR = WEB_DIR.parent / "sample-data"
-CACHE_FILE = WEB_DIR / ".vector_cache.pkl"
-RESP_CACHE_SIZE = 256
-
-# ---------- 上传与密钥配置 ----------
-UPLOAD_DIR = WEB_DIR / "uploads"
-CONFIG_FILE = WEB_DIR / ".api_config.json"
-SECRET_FILE = WEB_DIR / ".secret_key"
-SPOT_DOCS_FILE = WEB_DIR / ".spot_docs.json"   # 文档 → 景区 映射
-REMOVED_FILE = WEB_DIR / ".removed.json"       # {"spots": [...], "files": [...]} 删除/排除清单
-SPOTS_FILE = WEB_DIR / ".spots.json"           # 手动创建的景点文件夹名列表
-MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
-ALLOWED_EXTS = {".doc", ".docx", ".pdf", ".md",
-                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
-
-
-# ---------- 密钥加密存储（仅标准库，认证加密） ----------
-def _master_key() -> bytes:
-    if SECRET_FILE.exists():
-        return SECRET_FILE.read_bytes()
-    key = secrets.token_bytes(32)
-    SECRET_FILE.write_bytes(key)
-    try:
-        os.chmod(SECRET_FILE, 0o600)
-    except OSError:
-        pass
-    return key
-
-
-def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
-    out = bytearray()
-    counter = 0
-    while len(out) < length:
-        out += hmac.new(key, nonce + counter.to_bytes(8, "big"),
-                        hashlib.sha256).digest()
-        counter += 1
-    return bytes(out[:length])
-
-
-def encrypt_str(plaintext: str) -> str:
-    if not plaintext:
-        return ""
-    master = _master_key()
-    salt = secrets.token_bytes(16)
-    nonce = secrets.token_bytes(16)
-    dk = hashlib.pbkdf2_hmac("sha256", master, salt, 120_000, dklen=64)
-    enc_key, mac_key = dk[:32], dk[32:]
-    data = plaintext.encode("utf-8")
-    ct = bytes(a ^ b for a, b in zip(data, _keystream(enc_key, nonce, len(data))))
-    tag = hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(salt + nonce + tag + ct).decode("ascii")
-
-
-def decrypt_str(token: str) -> str:
-    if not token:
-        return ""
-    try:
-        raw = base64.urlsafe_b64decode(token.encode("ascii"))
-    except Exception:
-        return ""
-    if len(raw) < 64:
-        return ""
-    salt, nonce, tag, ct = raw[:16], raw[16:32], raw[32:64], raw[64:]
-    master = _master_key()
-    dk = hashlib.pbkdf2_hmac("sha256", master, salt, 120_000, dklen=64)
-    enc_key, mac_key = dk[:32], dk[32:]
-    expect = hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()
-    if not hmac.compare_digest(expect, tag):
-        return ""
-    data = bytes(a ^ b for a, b in zip(ct, _keystream(enc_key, nonce, len(ct))))
-    return data.decode("utf-8")
-
-
-def _load_config() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text("utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_config(cfg: dict) -> None:
-    CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False), "utf-8")
-
-
-def _load_json(path, default):
-    if path.exists():
-        try:
-            return json.loads(path.read_text("utf-8"))
-        except Exception:
-            return default
-    return default
-
-
-def _save_json(path, obj):
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), "utf-8")
-
-
-def _spot_docs() -> dict:
-    return _load_json(SPOT_DOCS_FILE, {})
-
-
-def _save_spot_docs(d: dict) -> None:
-    _save_json(SPOT_DOCS_FILE, d)
-
-
-def _removed() -> dict:
-    return _load_json(REMOVED_FILE, {"spots": [], "files": []})
-
-
-def _save_removed(d: dict) -> None:
-    _save_json(REMOVED_FILE, d)
-
-
-def _custom_spots() -> list:
-    v = _load_json(SPOTS_FILE, [])
-    return v if isinstance(v, list) else []
-
-
-def _save_custom_spots(lst: list) -> None:
-    _save_json(SPOTS_FILE, lst)
-
-
-def mask_key(key: str) -> str:
-    if not key:
-        return ""
-    if len(key) <= 8:
-        return key[0] + "*" * (len(key) - 1)
-    return key[:6] + "••••••" + key[-4:]
-
-
-# 运行时密钥：用户自定义优先，否则用内置默认值
-_saved_providers = set()
-
-
-def _init_runtime_keys() -> dict:
-    keys = {"deepseek": DEEPSEEK_KEY, "zhipu": ZHIPU_KEY}
-    for provider in keys:
-        enc = _load_config().get(provider)
-        if enc:
-            val = decrypt_str(enc)
-            if val:
-                keys[provider] = val
-                _saved_providers.add(provider)
-    return keys
-
-
-_runtime_keys = _init_runtime_keys()
-
-
-def http_json(url, payload, key, timeout=60):
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    )
-    return json.load(urllib.request.urlopen(req, timeout=timeout))
-
-
-def embed(text: str) -> list:
-    d = http_json(ZHIPU_EMBED_URL, {"model": EMBED_MODEL, "input": text},
-                  _runtime_keys["zhipu"])
-    return d["data"][0]["embedding"]
-
-
-def parse_spots_text(text: str, fallback_name: str = ""):
-    """解析 Markdown → [(名称, 正文)]：有 ## 标题按标题拆分，否则整文件作为单个条目"""
-    parts = re.split(r"(?m)^##\s+", text)
-    if len(parts) > 1:
-        out = []
-        for p in parts[1:]:
-            lines = p.strip().split("\n")
-            name = lines[0].strip()
-            body = f"{name}\n" + "\n".join(lines[1:]).strip()
-            if name and body:
-                out.append((name, body))
-        return out
-    body = text.strip()
-    return [(fallback_name or "未命名景点", body)] if body else []
-
-
-def _md_files() -> list:
-    """收集知识库目录（sample-data + uploads）下所有 .md 文件，去重，过滤已删除清单"""
-    removed_files = set(_removed().get("files", []))
-    seen, out = set(), []
-    for d in (SAMPLE_DIR, UPLOAD_DIR):
-        if d.exists():
-            for f in sorted(d.glob("*.md")):
-                if f.name in removed_files:
-                    continue
-                key = str(f)
-                if key not in seen:
-                    seen.add(key)
-                    out.append(f)
-    return out
-
-
-_vectors_lock = threading.Lock()
-
-
-def _persist_cache(entries=None):
-    """将当前向量(或给定 entries)与 .md 文件清单写入磁盘缓存"""
-    if entries is None:
-        entries = list(_vectors)
-    files_meta = {str(f): f.stat().st_mtime for f in _md_files()}
-    CACHE_FILE.write_bytes(pickle.dumps({
-        "model": EMBED_MODEL, "entries": entries, "files": files_meta}))
-
-
-# ---------- 启动时构建/加载向量缓存（支持增量） ----------
-def load_or_build_cache() -> list:
-    entries, files_meta = [], {}
-    if CACHE_FILE.exists():
-        try:
-            cache = pickle.loads(CACHE_FILE.read_bytes())
-            if cache.get("model") == EMBED_MODEL and "files" in cache:
-                entries = list(cache.get("entries") or [])
-                files_meta = dict(cache.get("files") or {})
-                # 丢弃源文件已不存在的条目（如曾硬删除的上传文档），避免陈旧向量残留
-                entries = [e for e in entries if Path(e[3]).exists()]
-                print(f"[缓存] 磁盘命中, 加载 {len(entries)} 条")
-        except Exception as e:
-            print(f"[缓存] 加载失败: {e}, 重建中")
-
-    md_files = _md_files()
-    current = {str(f): f.stat().st_mtime for f in md_files}
-    new_files = [f for f in md_files if files_meta.get(str(f)) != current[str(f)]]
-
-    if new_files:
-        raw = []  # [(名称, 正文, 源文件路径)]
-        for f in new_files:
-            src = str(f)
-            for name, body in parse_spots_text(
-                    f.read_text(encoding="utf-8", errors="ignore"), f.stem):
-                raw.append((name, body, src))
-        if raw:
-            print(f"[嵌入] 正在向量化 {len(raw)} 个新景点条目 ...")
-            t0 = time.time()
-            for name, body, src in raw:
-                entries.append((name, body, embed(body), src))
-            print(f"[嵌入] 完成, 耗时 {time.time() - t0:.2f}s")
-        for f in new_files:
-            files_meta[str(f)] = current[str(f)]
-        _persist_cache(entries)
-
-    removed_spots = set(_removed().get("spots", []))
-    if removed_spots:
-        entries = [e for e in entries if e[0] not in removed_spots]
-    return entries
-
-
-_vectors = load_or_build_cache()
-
-
-# ---------- 检索 ----------
-def cosine(a, b) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
-
-
-def retrieve(question: str, top_k: int = 4, threshold: float = 0.35):
-    qv = embed(question)
-    with _vectors_lock:
-        snapshot = list(_vectors)
-    scored = sorted(((cosine(qv, v), n, b) for n, b, v, _ in snapshot), reverse=True)
-    top = scored[:top_k]
-    passed = [(n, b) for s, n, b in top if s >= threshold]
-    return passed, top
-
-
-def _safe_history(raw):
-    """校验并裁剪前端传来的多轮历史，只保留合法 user/assistant 文本，防止注入/过大。"""
-    out = []
-    for h in (raw or [])[-12:]:
-        if not isinstance(h, dict):
-            continue
-        role = h.get("role")
-        content = h.get("content")
-        if role not in ("user", "assistant") or not isinstance(content, str):
-            continue
-        if len(content) > 4000:
-            content = content[:4000]
-        out.append({"role": role, "content": content})
-    return out
-
-
-# ---------- 语义响应缓存 (LRU) ----------
-_resp_cache = OrderedDict()
-_cache_lock = threading.Lock()
-
-
-def _norm(s: str) -> str:
-    return re.sub(r"[\s，。！？、,.!?\"'“”‘’]", "", s.lower())
-
-
-def cache_get(k):
-    with _cache_lock:
-        if k in _resp_cache:
-            _resp_cache.move_to_end(k)
-            return _resp_cache[k]
-    return None
-
-
-def cache_put(k, v):
-    with _cache_lock:
-        _resp_cache[k] = v
-        _resp_cache.move_to_end(k)
-        if len(_resp_cache) > RESP_CACHE_SIZE:
-            _resp_cache.popitem(last=False)
-
-
-# ---------- DeepSeek 流式 ----------
-def deepseek_stream(messages):
-    payload = {"model": "deepseek-chat", "messages": messages,
-               "stream": True, "temperature": 0.7}
-    req = urllib.request.Request(
-        DEEPSEEK_URL, data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {_runtime_keys['deepseek']}",
-                 "Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=120)
-    for raw in resp:
-        line = raw.decode("utf-8", errors="ignore").strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            obj = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        delta = obj["choices"][0].get("delta", {}).get("content", "")
-        if delta:
-            yield delta
+# 运行时密钥：用户自定义优先，否则用环境变量默认值（须在加载向量库前完成）
+init_runtime_keys({"deepseek": DEEPSEEK_KEY, "zhipu": ZHIPU_KEY})
+# 向量库就绪（含新文档增量嵌入）
+ensure_vectors()
 
 
 # ---------- HTTP handler ----------
-def sse_event(obj: dict) -> bytes:
-    return ("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode("utf-8")
-
-
 class Handler(BaseHTTPRequestHandler):
     server_version = "ScenicServer/2.0"
 
@@ -436,7 +120,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
-            f = WEB_DIR / "index.html"
+            f = storage.WEB_DIR / "index.html"
             data = f.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -456,7 +140,7 @@ class Handler(BaseHTTPRequestHandler):
             for name in _custom_spots():
                 add(name, "")
             # 2) md 解析的景点
-            for e in _vectors:
+            for e in ensure_vectors():
                 intro = ""
                 for line in e[1].split("\n"):
                     if line.startswith("简介："):
@@ -518,14 +202,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             return
 
-        # 命中语义缓存
+        # 命中语义缓存（带来源）
         k = _norm(message)
         cached = cache_get(k)
         if cached:
             self._sse_start()
             self.wfile.write(sse_event({
-                "textResponse": cached, "close": False, "cached": True}))
-            self.wfile.write(sse_event({"textResponse": "", "close": True}))
+                "textResponse": cached["text"], "close": False, "cached": True}))
+            self.wfile.write(sse_event({
+                "textResponse": "", "close": True, "sources": cached["sources"]}))
             self.wfile.flush()
             return
 
@@ -567,14 +252,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(sse_event({"error": f"生成失败：{e}", "close": True}))
             self.wfile.flush()
             if collected:
-                cache_put(k, "".join(collected))
+                cache_put(k, "".join(collected), [])
             return
         self.wfile.write(sse_event({"textResponse": "", "close": True,
                                     "sources": [{"title": n} for n, _ in passed]}))
         self.wfile.flush()
 
         if collected:
-            cache_put(k, "".join(collected))
+            cache_put(k, "".join(collected),
+                      [{"title": n} for n, _ in passed])
 
     # ---------- 文档上传 / 列表 / 删除 ----------
     def _handle_files(self):
@@ -633,6 +319,10 @@ class Handler(BaseHTTPRequestHandler):
         if length > MAX_UPLOAD_SIZE:
             self._json({"error": f"文件大小超出限制（最大 {MAX_UPLOAD_SIZE // (1024 * 1024)} MB）"}, 413)
             return
+        # 总量控制：uploads 目录总空间上限
+        if upload_total_size() + length > UPLOAD_TOTAL_LIMIT:
+            self._json({"error": f"上传空间已满（总上限 {UPLOAD_TOTAL_LIMIT // (1024 * 1024)} MB），请先删除部分文件再上传"}, 413)
+            return
         UPLOAD_DIR.mkdir(exist_ok=True)
         stem, suffix = Path(name).stem, Path(name).suffix
         dest = UPLOAD_DIR / name
@@ -677,20 +367,20 @@ class Handler(BaseHTTPRequestHandler):
         if not entries:
             return 0
         new = [(n, b, embed(b), str(path)) for n, b in entries]
-        with _vectors_lock:
-            _vectors.extend(new)
-            _persist_cache()
+        vs = ensure_vectors()
+        vs.extend(new)
+        _persist_cache()
         return len(new)
 
     def _remove_md_from_knowledge(self, path):
         """从向量库移除某 .md 文件的全部条目，返回移除数"""
         src = str(path)
-        with _vectors_lock:
-            before = len(_vectors)
-            _vectors[:] = [e for e in _vectors if e[3] != src]
-            if len(_vectors) != before:
-                _persist_cache()
-            return before - len(_vectors)
+        vs = ensure_vectors()
+        before = len(vs)
+        vs[:] = [e for e in vs if e[3] != src]
+        if len(vs) != before:
+            _persist_cache()
+        return before - len(vs)
 
     def _handle_delete_file(self, path):
         parsed = urlparse(self.path)
@@ -746,11 +436,11 @@ class Handler(BaseHTTPRequestHandler):
         if not name:
             self._json({"error": "景点名不能为空"}, 400)
             return
-        with _vectors_lock:
-            before = len(_vectors)
-            _vectors[:] = [e for e in _vectors if e[0] != name]
-            if len(_vectors) != before:
-                _persist_cache()
+        vs = ensure_vectors()
+        before = len(vs)
+        vs[:] = [e for e in vs if e[0] != name]
+        if len(vs) != before:
+            _persist_cache()
         rem = _removed()
         if name not in rem.get("spots", []):
             rem.setdefault("spots", []).append(name)
@@ -844,7 +534,7 @@ def main():
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"景点讲解网页(直连版)已启动: http://{args.host}:{args.port}")
-    print(f"  景点: {len(_vectors)} 条 | 嵌入: {EMBED_MODEL} | 聊天: deepseek-chat")
+    print(f"  景点: {len(ensure_vectors())} 条 | 嵌入: {EMBED_MODEL} | 聊天: deepseek-chat")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

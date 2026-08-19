@@ -144,6 +144,16 @@
   .msg.user .bubble { background: var(--accent); color: #fff; }
   .cursor { display: inline-block; width: 8px; height: 15px; background: var(--accent); vertical-align: -2px; animation: blink .8s infinite; }
   @keyframes blink { 50% { opacity: 0; } }
+  /* 无障碍：视觉隐藏但读屏器可读的标题 */
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  /* 无障碍：用户系统开启「减弱动态效果」时，关闭光标闪烁与过渡动画 */
+  @media (prefers-reduced-motion: reduce) {
+    .cursor { animation: none; }
+    *, *::before, *::after { transition: none !important; }
+  }
   .msg-actions { display: flex; gap: 6px; }
   .mini-btn {
     border: none; background: none; cursor: pointer; color: var(--muted);
@@ -348,6 +358,8 @@
 </style>
 </head>
 <body>
+  <h1 class="visually-hidden">景点讲解 AI</h1>
+
   <header>
     <button class="icon-btn menu-btn" id="menuBtn" aria-label="打开景点列表">☰</button>
     <div class="logo">景</div>
@@ -812,14 +824,27 @@
               let obj; try { obj = JSON.parse(data); } catch { continue; }
               if (obj.error) { reject(new Error(obj.error)); return; }
               if (obj.textResponse) {
-                bubble.innerHTML = "";
-                bubble.textContent = (bubble._full || "") + obj.textResponse;
-                bubble._full = bubble.textContent;
-                bubble.innerHTML += '<span class="cursor"></span>';
-                scrollBottom();
+                // 流式节流：先累加文本，每 200ms 才刷新一次 DOM，
+                // 避免 aria-live 区域逐字更新导致读屏器逐字朗读
+                bubble._full = (bubble._full || "") + obj.textResponse;
+                if (!bubble._liveTimer) {
+                  bubble._liveTimer = setTimeout(() => {
+                    bubble._liveTimer = null;
+                    bubble.innerHTML = "";
+                    bubble.textContent = bubble._full;
+                    bubble.innerHTML += '<span class="cursor"></span>';
+                    scrollBottom();
+                  }, 200);
+                }
                 onText(obj.textResponse);
               }
-              if (obj.close) { closed = true; sources = obj.sources || []; }
+              if (obj.close) {
+                closed = true; sources = obj.sources || [];
+                if (bubble._liveTimer) { clearTimeout(bubble._liveTimer); bubble._liveTimer = null; }
+                bubble.innerHTML = "";
+                bubble.textContent = bubble._full || "";
+                bubble.innerHTML += '<span class="cursor"></span>';
+              }
             }
           }
           resolve(sources);
