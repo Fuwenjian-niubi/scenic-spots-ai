@@ -6,7 +6,7 @@
 用法:
   python demo_chat.py "介绍一下陈家祠的历史"
 环境变量:
-  ALLM_BASE    AnythingLLM 地址, 默认 http://localhost:3001
+  ALLM_BASE    AnythingLLM 地址, 默认 http://127.0.0.1:3001
   ALLM_KEY     API Key(AnythingLLM 设置页 → API Keys 生成)
   ALLM_SLUG    工作区 slug, 默认 scenic-spots
 """
@@ -17,7 +17,7 @@ import sys
 
 import requests
 
-BASE = os.environ.get("ALLM_BASE", "http://localhost:3001")
+BASE = os.environ.get("ALLM_BASE", "http://127.0.0.1:3001")
 API_KEY = os.environ.get("ALLM_KEY", "YOUR_API_KEY")
 WS_SLUG = os.environ.get("ALLM_SLUG", "scenic-spots")
 

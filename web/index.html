@@ -536,6 +536,7 @@
   let spotFiles = [];             // 文档列表（含 spots 归属）
   let currentSpot = null;
   let sessionId = "web-" + Date.now();
+  let history = [];               // 多轮对话历史 [{role, content}]，随请求发送给后端
   let voiceOn = false;
   let streaming = false;
   let uploadTargetSpot = "";      // 当前上传目标景点
@@ -544,7 +545,8 @@
   let settings = JSON.parse(localStorage.getItem("scenic.settings") || "{}");
   const QUICK_PROMPTS = ["怎么去", "门票多少", "开放时间", "推荐看点"];
 
-  // ================= 演示数据（后端不可达时兜底） =================
+  // ================= 演示数据（后端不可达时兜底，仅 3 个示例景点） =================
+  // 注：完整知识库含 12 个景点（见 sample-data/），启动后端后自动从 /api/spots 加载。
   const DEMO_SPOTS = [
     { name: "广州塔", intro: "位于广州市海珠区，塔高600米，是中国第一高塔、世界第三高塔，广州的城市地标。" },
     { name: "陈家祠", intro: "广东现存规模最大、保存最完整的清代宗祠建筑群，建于1894年，岭南建筑明珠。" },
@@ -728,16 +730,19 @@
     input.value = ""; autoResize();
     speechSynthesis.cancel();  // 新一轮对话：停止上一段播报
     addMsg("user", message);
+    history.push({ role: "user", content: message }); trimHistory();
     const wrap = addMsg("assistant", "");
     const bubble = wrap.querySelector(".bubble");
     bubble.innerHTML = '<span class="cursor"></span>';
     setStreaming(true);
     let full = "";
 
-    doChat(message, wrap, bubble, (text) => { full += text; })
+    doChat(message, history, wrap, bubble, (text) => { full += text; })
       .then((sources) => {
+        if (sources === false) return;  // 演示兜底：不补来源/动作/历史
         bubble.querySelector(".cursor")?.remove();
         finishSources(bubble, sources);
+        history.push({ role: "assistant", content: full }); trimHistory();
         addActions(wrap, full);
         if (voiceOn && full.trim()) speak(full);
       })
@@ -751,6 +756,9 @@
       })
       .finally(() => setStreaming(false));
   }
+  function trimHistory() {
+    if (history.length > 12) history = history.slice(-12);
+  }
   function retry(message, btn) {
     const wrap = btn.closest(".bubble-wrap");
     btn.closest(".error-line").remove();
@@ -758,53 +766,68 @@
     bubble.innerHTML = '<span class="cursor"></span>';
     setStreaming(true);
     let full = "";
-    doChat(message, wrap, bubble, (t) => { full += t; })
-      .then((sources) => { bubble.querySelector(".cursor")?.remove(); finishSources(bubble, sources); addActions(wrap, full); if (voiceOn && full.trim()) speak(full); })
+    doChat(message, history, wrap, bubble, (t) => { full += t; })
+      .then((sources) => {
+        if (sources === false) return;
+        bubble.querySelector(".cursor")?.remove();
+        finishSources(bubble, sources);
+        history.push({ role: "assistant", content: full }); trimHistory();
+        addActions(wrap, full); if (voiceOn && full.trim()) speak(full);
+      })
       .catch((e) => { bubble.innerHTML = ""; bubble.textContent = "重试失败：" + (e.message || "网络错误"); })
       .finally(() => setStreaming(false));
   }
   let abortCtrl = null;
-  function doChat(message, wrap, bubble, onText) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        abortCtrl = new AbortController();
-        const resp = await fetch("/api/chat", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, sessionId }), signal: abortCtrl.signal,
-        });
-        if (!resp.ok) throw new Error("http " + resp.status);
+  function doChat(message, history, wrap, bubble, onText) {
+    return new Promise((resolve, reject) => {
+      (async () => {
+        let resp;
+        try {
+          abortCtrl = new AbortController();
+          resp = await fetch("/api/chat", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message, sessionId, history }), signal: abortCtrl.signal,
+          });
+        } catch (e) {
+          if (e.name === "AbortError") { reject(new Error("已停止")); return; }
+          // 仅「网络层不可达」才进演示兜底；已开始接收真实内容则报错而非切换演示
+          if (bubble._full) { reject(new Error("讲解中断，请重试")); return; }
+          await demoStream(message, bubble, onText); resolve(false); return;
+        }
+        if (!resp.ok) { reject(new Error("服务错误：" + resp.status)); return; }
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buf = "", closed = false, sources = [];
-        while (!closed) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          let i;
-          while ((i = buf.indexOf("\n")) !== -1) {
-            const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-            if (!line.startsWith("data:")) continue;
-            const data = line.slice(5).trim();
-            if (!data || data === "[DONE]") continue;
-            let obj; try { obj = JSON.parse(data); } catch { continue; }
-            if (obj.textResponse) {
-              bubble.innerHTML = "";
-              bubble.textContent = (bubble._full || "") + obj.textResponse;
-              bubble._full = bubble.textContent;
-              bubble.innerHTML += '<span class="cursor"></span>';
-              scrollBottom();
-              onText(obj.textResponse);
+        try {
+          while (!closed) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let i;
+            while ((i = buf.indexOf("\n")) !== -1) {
+              const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+              if (!line.startsWith("data:")) continue;
+              const data = line.slice(5).trim();
+              if (!data || data === "[DONE]") continue;
+              let obj; try { obj = JSON.parse(data); } catch { continue; }
+              if (obj.error) { reject(new Error(obj.error)); return; }
+              if (obj.textResponse) {
+                bubble.innerHTML = "";
+                bubble.textContent = (bubble._full || "") + obj.textResponse;
+                bubble._full = bubble.textContent;
+                bubble.innerHTML += '<span class="cursor"></span>';
+                scrollBottom();
+                onText(obj.textResponse);
+              }
+              if (obj.close) { closed = true; sources = obj.sources || []; }
             }
-            if (obj.close) { closed = true; sources = obj.sources || []; }
           }
+          resolve(sources);
+        } catch (e) {
+          if (e.name === "AbortError") { reject(new Error("已停止")); return; }
+          reject(new Error("讲解中断，请重试")); return;
         }
-        resolve(sources);
-      } catch (e) {
-        if (e.name === "AbortError") { reject(new Error("已停止")); return; }
-        // 演示模式兜底
-        await demoStream(message, bubble, onText);
-        resolve([]);
-      }
+      })();
     });
   }
   function setStreaming(v) {
@@ -1027,7 +1050,7 @@
               <div class="file-name" title="${esc(f.name)}">${esc(f.name)}</div>
               <div class="file-sub">${f.source === "sample" ? "内置" : "上传"} · ${formatSize(f.size)}</div>
             </div>
-            <button class="file-del" data-name="${encodeURIComponent(f.name)}">删除</button>
+            <button class="file-del" data-name="${encodeURIComponent(f.name)}" data-source="${f.source}">删除</button>
           </div>`).join("")
         : '<div class="empty">该景点暂无文档，点击上方「上传文档」添加</div>';
       return `<div class="folder">
@@ -1046,7 +1069,7 @@
         </div>
       </div>`;
     }).join("");
-    el.querySelectorAll(".file-del").forEach(b => b.onclick = (e) => { e.stopPropagation(); deleteFile(b.dataset.name); });
+    el.querySelectorAll(".file-del").forEach(b => b.onclick = (e) => { e.stopPropagation(); deleteFile(b.dataset.name, b.dataset.source); });
   }
   function toggleFolder(name) {
     expandedSpot = expandedSpot === name ? null : name;
@@ -1071,13 +1094,16 @@
     } catch (e) { toast("创建失败：" + e.message, "error"); }
     loadSpots();
   }
-  async function deleteFile(encName) {
-    if (!confirm(`确定删除「${decodeURIComponent(encName)}」吗？删除后将同时从知识库移除。`)) return;
+  async function deleteFile(encName, source) {
+    const fname = decodeURIComponent(encName);
+    const hint = source === "sample" ? "（内置文档将从知识库移除，源文件保留可恢复）" : "";
+    if (!confirm(`确定删除「${fname}」吗？删除后将同时从知识库移除${hint}。`)) return;
+    const qs = source ? ("?source=" + encodeURIComponent(source)) : "";
     try {
-      const r = await fetch("/api/files/" + encName, { method: "DELETE" });
+      const r = await fetch("/api/files/" + encName + qs, { method: "DELETE" });
       const d = await r.json();
       if (!r.ok) { toast(d.error || "删除失败", "error"); return; }
-      toast("已删除", "success");
+      toast(d.hard ? "已删除" : "已从知识库移除（可恢复）", "success");
     } catch (e) { toast("删除失败：" + e.message, "error"); }
     loadFiles(); loadSpots();
   }

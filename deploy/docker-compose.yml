@@ -1,5 +1,7 @@
 # 景点讲解 AI —— AnythingLLM 部署配置
-# 用法: docker compose up -d    访问: http://localhost:3001
+# ⚠️ 遗留方案（未维护）：当前主线为直连版（web/server.py，零 Docker）。
+# 仅当需要完整 RAG 管理台时使用；代码中的 examples/demo_*.py 与之对应。
+# 用法: docker compose up -d    访问: http://127.0.0.1:3001
 #
 # 全云端方案: 聊天走 DeepSeek，嵌入走智谱 embedding-3，无需本地 Ollama。
 # 只需填两个 Key: DEEPSEEK_API_KEY 与 GENERIC_OPEN_AI_EMBEDDING_API_KEY。

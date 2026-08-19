@@ -4,9 +4,10 @@
 智谱 embedding-3 + 本地余弦检索 + DeepSeek 流式讲解
 无需 Docker / AnythingLLM / Ollama
 
-启动: python web/server.py    访问: http://localhost:8080
+启动: python web/server.py    访问: http://127.0.0.1:8080
 """
 
+import argparse
 import base64
 import hashlib
 import hmac
@@ -24,6 +25,35 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+
+# ---------- 加载 .env（零第三方依赖，纯标准库） ----------
+def load_dotenv():
+    """读取项目根目录的 .env，将 KEY=VALUE 注入 os.environ（已存在的变量优先，便于 export 覆盖）。
+
+    查找顺序：server.py 上级目录（项目根） → web 目录 → 当前工作目录。
+    """
+    here = Path(__file__).resolve().parent
+    candidates = [here.parent / ".env", here / ".env", Path(".env")]
+    env_path = next((p for p in candidates if p.is_file()), None)
+    if env_path is None:
+        return
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+load_dotenv()
+
 # ---------- 配置 ----------
 PORT = 8080
 # API Key 从环境变量读取，避免泄露真实 Key。也可在网页「设置」中录入（加密存储于 .api_config.json）。
@@ -32,6 +62,12 @@ ZHIPU_KEY = os.environ.get("ZHIPU_API_KEY", "")
 ZHIPU_EMBED_URL = "https://open.bigmodel.cn/api/paas/v4/embeddings"
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 EMBED_MODEL = "embedding-3"
+
+SYSTEM_PROMPT = (
+    "你是专业的景点讲解员。仅根据提供的景点资料，用简洁、准确、生动的中文回答游客问题；"
+    "资料中没有的信息要如实说明。可结合对话上下文回答游客的追问。"
+)
+SYSTEM_MSG = {"role": "system", "content": SYSTEM_PROMPT}
 
 WEB_DIR = Path(__file__).resolve().parent
 SAMPLE_DIR = WEB_DIR.parent / "sample-data"
@@ -252,6 +288,8 @@ def load_or_build_cache() -> list:
             if cache.get("model") == EMBED_MODEL and "files" in cache:
                 entries = list(cache.get("entries") or [])
                 files_meta = dict(cache.get("files") or {})
+                # 丢弃源文件已不存在的条目（如曾硬删除的上传文档），避免陈旧向量残留
+                entries = [e for e in entries if Path(e[3]).exists()]
                 print(f"[缓存] 磁盘命中, 加载 {len(entries)} 条")
         except Exception as e:
             print(f"[缓存] 加载失败: {e}, 重建中")
@@ -294,12 +332,30 @@ def cosine(a, b) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def retrieve(question: str, top_k: int = 2):
+def retrieve(question: str, top_k: int = 4, threshold: float = 0.35):
     qv = embed(question)
     with _vectors_lock:
         snapshot = list(_vectors)
     scored = sorted(((cosine(qv, v), n, b) for n, b, v, _ in snapshot), reverse=True)
-    return [(n, b) for _, n, b in scored[:top_k]]
+    top = scored[:top_k]
+    passed = [(n, b) for s, n, b in top if s >= threshold]
+    return passed, top
+
+
+def _safe_history(raw):
+    """校验并裁剪前端传来的多轮历史，只保留合法 user/assistant 文本，防止注入/过大。"""
+    out = []
+    for h in (raw or [])[-12:]:
+        if not isinstance(h, dict):
+            continue
+        role = h.get("role")
+        content = h.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        if len(content) > 4000:
+            content = content[:4000]
+        out.append({"role": role, "content": content})
+    return out
 
 
 # ---------- 语义响应缓存 (LRU) ----------
@@ -453,6 +509,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "empty message"}, 400)
             return
 
+        # 密钥未配置：给出引导，不进演示也不报错
+        if not _runtime_keys["zhipu"] or not _runtime_keys["deepseek"]:
+            self._sse_start()
+            self.wfile.write(sse_event({
+                "textResponse": "尚未配置 API Key，无法生成真实讲解。请到「设置 → 账号」填入 DeepSeek 与智谱 Key（详见 README）。",
+                "close": True, "sources": []}))
+            self.wfile.flush()
+            return
+
         # 命中语义缓存
         k = _norm(message)
         cached = cache_get(k)
@@ -464,30 +529,48 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             return
 
-        # 检索
+        # 检索（带相似度阈值，过滤库外问题）
         try:
-            top = retrieve(message, top_k=2)
+            passed, _ = retrieve(message, top_k=4, threshold=0.35)
         except Exception as e:
             self._json({"error": f"检索失败: {e}"}, 502)
             return
 
-        context = "\n\n".join(f"【{n}】\n{b}" for n, b in top)
-        messages = [
-            {"role": "system",
-             "content": "你是专业的景点讲解员。仅根据提供的景点资料，用简洁、准确、生动的中文回答游客问题；资料中没有的信息要如实说明。"},
-            {"role": "user",
-             "content": f"景点资料：\n{context}\n\n游客提问：{message}"},
-        ]
+        if not passed:
+            self._sse_start()
+            self.wfile.write(sse_event({
+                "textResponse": "抱歉，知识库中暂未收录与此相关的信息。您可以询问该景点的门票、开放时间、交通或看点，或到「设置 → 通用」上传相关文档。",
+                "close": True, "sources": []}))
+            self.wfile.flush()
+            return
+
+        context = "\n\n".join(f"【{n}】\n{b}" for n, b in passed)
+
+        # 组装多轮消息：历史 + 当前问题（上下文注入到最后一轮用户消息）
+        messages = [SYSTEM_MSG] + list(_safe_history(body.get("history")))
+        if messages[-1]["role"] == "user":
+            messages[-1]["content"] = (
+                f"景点资料：\n{context}\n\n游客提问：{messages[-1]['content']}")
+        else:
+            messages.append({"role": "user",
+                             "content": f"景点资料：\n{context}\n\n游客提问：{message}"})
 
         # 流式转发
         self._sse_start()
         collected = []
-        for delta in deepseek_stream(messages):
-            collected.append(delta)
-            self.wfile.write(sse_event({"textResponse": delta, "close": False}))
+        try:
+            for delta in deepseek_stream(messages):
+                collected.append(delta)
+                self.wfile.write(sse_event({"textResponse": delta, "close": False}))
+                self.wfile.flush()
+        except Exception as e:
+            self.wfile.write(sse_event({"error": f"生成失败：{e}", "close": True}))
             self.wfile.flush()
+            if collected:
+                cache_put(k, "".join(collected))
+            return
         self.wfile.write(sse_event({"textResponse": "", "close": True,
-                                    "sources": [{"title": n} for n, _ in top]}))
+                                    "sources": [{"title": n} for n, _ in passed]}))
         self.wfile.flush()
 
         if collected:
@@ -610,14 +693,20 @@ class Handler(BaseHTTPRequestHandler):
             return before - len(_vectors)
 
     def _handle_delete_file(self, path):
-        name = unquote(path[len("/api/files/"):])
+        parsed = urlparse(self.path)
+        name = unquote(parsed.path[len("/api/files/"):])
         name = Path(name).name
+        want_source = (parse_qs(parsed.query).get("source") or [""])[0].strip()
         target = None
         in_upload = False
         for d in (UPLOAD_DIR, SAMPLE_DIR):
             if d.exists():
                 cand = d / name
                 if cand.is_file():
+                    src_label = "upload" if d == UPLOAD_DIR else "sample"
+                    # 前端带 source 时，只删对应目录的那一份（解决重名歧义）
+                    if want_source and want_source != src_label:
+                        continue
                     target = cand
                     in_upload = (d == UPLOAD_DIR)
                     break
@@ -625,11 +714,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "文件不存在"}, 404)
             return
         is_md = target.suffix.lower() == ".md"
+        hard = False
         if in_upload:
             try:
                 target.unlink()
+                hard = True
             except OSError as e:
-                self._json({"error": f"删除失败: {e}"}, 500)
+                if getattr(e, "winerror", None) == 32 or "另一个程序" in str(e):
+                    msg = "删除失败：文件被其他程序占用，请关闭后再试"
+                else:
+                    msg = f"删除失败：无权限（{e}）"
+                self._json({"error": msg}, 500)
                 return
         else:
             # 内置 sample 文件：加入排除清单，不删源文件（可恢复）
@@ -644,7 +739,7 @@ class Handler(BaseHTTPRequestHandler):
         if name in sd:
             del sd[name]
             _save_spot_docs(sd)
-        self._json({"ok": True})
+        self._json({"ok": True, "hard": hard})
 
     def _handle_delete_spot(self, path):
         name = unquote(path[len("/api/spots/"):]).strip()
@@ -741,8 +836,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"景点讲解网页(直连版)已启动: http://localhost:{PORT}")
+    ap = argparse.ArgumentParser(description="景点讲解 AI 直连版后端")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="监听地址，默认 127.0.0.1（仅本机）。局域网共享用 0.0.0.0（需自行保障网络安全）")
+    ap.add_argument("--port", type=int, default=PORT, help=f"监听端口，默认 {PORT}")
+    args = ap.parse_args()
+
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"景点讲解网页(直连版)已启动: http://{args.host}:{args.port}")
     print(f"  景点: {len(_vectors)} 条 | 嵌入: {EMBED_MODEL} | 聊天: deepseek-chat")
     try:
         server.serve_forever()
