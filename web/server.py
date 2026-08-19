@@ -25,6 +25,7 @@ from crypto import (
     mask_key,
 )
 from extract import extract_text
+from ocr import OCR_MAX_IMAGE_BYTES, describe_image
 from rag import (
     EMBED_MODEL,
     SYSTEM_MSG,
@@ -378,15 +379,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 embed_err = str(e)
         else:
-            # 图片：无 OCR 能力，仅记录「文件名+归属」标签条目，可检索到资料存在
+            # 图片：先尝试视觉模型识别内容（提取文字+描述入知识库），失败降级为文件名标签
             sd = _spot_docs()
             sd[dest.name] = entry_name
             _save_spot_docs(sd)
+            added = 0
             try:
-                label = f"【资料文件】{dest.name}（{entry_name}）"
-                added = self._embed_spot_text(dest, entry_name, label)
+                desc = ""
+                if dest.stat().st_size <= OCR_MAX_IMAGE_BYTES:
+                    desc = describe_image(dest, _runtime_keys["zhipu"]) or ""
+                if desc:
+                    added = self._embed_spot_text(dest, entry_name, desc)
+                    if not added:
+                        embed_err = "图片内容识别结果为空，已降级为文件名标签"
+                else:
+                    embed_err = "图片超过 8MB 或内容识别失败，已降级为文件名标签"
             except Exception as e:
-                embed_err = str(e)
+                embed_err = f"图片内容识别失败（{e}），已降级为文件名标签"
+            if embed_err:
+                # 降级：文件名标签条目，保证「该景点有这份资料」可检索
+                try:
+                    label = f"【资料文件】{dest.name}（{entry_name}）"
+                    added = self._embed_spot_text(dest, entry_name, label)
+                except Exception:  # noqa: S110  # 降级失败不影响文件已保存
+                    pass
         resp = {"ok": True, "name": dest.name, "size": length, "entries": added}
         if embed_err:
             resp["warning"] = f"文件已保存，但{embed_err}"

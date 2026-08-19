@@ -1060,10 +1060,10 @@
         const d = await resp.json();
         if (!resp.ok) { toast(d.error || "上传失败", "error"); continue; }
         if (d.warning) { toast(d.warning, "error"); continue; }
-        // 按类型提示入库情况：md 整文解析；docx/pdf 提取文本；图片仅记录文件名
+        // 按类型提示入库情况：md 整文解析；docx/pdf 提取文本；图片视觉模型识别内容
         const t = extType(file.name);
         let extra;
-        if (t === "img") extra = d.entries ? `，已记录文件名（图片不识别内容）` : "";
+        if (t === "img") extra = d.entries ? `，已识别图片内容并加入知识库 ${d.entries} 条` : "";
         else if (t === "word" || t === "pdf") extra = d.entries ? `，已提取文本并加入知识库 ${d.entries} 条` : "，未能提取文本";
         else extra = d.entries ? `，已加入知识库 ${d.entries} 条` : "";
         toast(`「${d.name}」上传成功${extra}`, "success");
