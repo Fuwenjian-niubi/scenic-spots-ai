@@ -20,8 +20,6 @@ web/.removed.json
 web/.spot_docs.json
 web/.spots.json
 web/uploads/
-deploy/storage/
-deploy/collector/
 
 # 生成的音频
 讲解音频.mp3

@@ -31,7 +31,7 @@ def _fatal(msg: str):
     _log(msg)
     try:
         ctypes.windll.user32.MessageBoxW(0, msg, "景点讲解 AI - 启动失败", 0x10)
-    except Exception:
+    except Exception:  # noqa: S110  # 无桌面会话时弹窗失败不影响启动
         pass
     os._exit(1)
 

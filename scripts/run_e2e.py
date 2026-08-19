@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-端到端连通性验证 + 无 Docker 兜底实现
+端到端连通性验证：完整 RAG 链路自检
 智谱 embedding-3(向量化) + 本地余弦检索 + DeepSeek 流式讲解
 
 用途：
-  1. 验证两个 Key 与完整 RAG 链路是否打通（AnythingLLM 就绪前的立即验证）
-  2. 作为不依赖 AnythingLLM/Docker 的轻量兜底讲解引擎
+  1. 验证两个 Key 与完整 RAG 链路是否打通（部署前快速自检）
+  2. 命令行直连讲解（无需启动 Web 服务）
 
 零第三方依赖（仅标准库）。运行：python scripts/run_e2e.py
 """
@@ -17,8 +17,8 @@ import sys
 import time
 import urllib.request
 
-# ---------- 配置（与 docker-compose.yml 保持一致） ----------
-# 从环境变量读取，避免泄露真实 Key。用法：
+# ---------- 配置（从环境变量读取，避免泄露真实 Key） ----------
+# 用法：
 #   set DEEPSEEK_API_KEY=xxx && set ZHIPU_API_KEY=xxx && python scripts/run_e2e.py
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 ZHIPU_KEY = os.environ.get("ZHIPU_API_KEY", "")
